@@ -1,15 +1,15 @@
 [package]
 name = "ditto-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Reyansh Gupta"]
-description = "A terminal profile switcher for Claude Code and Codex"
+description = "A terminal profile switcher for Claude Code, Codex, opencode, and OMP"
 license = "MIT"
 repository = "https://github.com/reyanshgupta/ditto-cli"
 homepage = "https://github.com/reyanshgupta/ditto-cli"
 readme = "README.md"
-keywords = ["claude-code", "codex", "profiles", "tui"]
+keywords = ["claude-code", "codex", "opencode", "omp", "profiles"]
 categories = ["command-line-utilities"]
 
 [[bin]]

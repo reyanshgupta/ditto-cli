@@ -1,7 +1,14 @@
-use std::{collections::HashMap, env};
+use std::{
+    collections::HashMap,
+    env,
+    path::Path,
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::Duration,
+};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
@@ -18,6 +25,19 @@ use crate::{
 const DITTO_PURPLE: Color = Color::Rgb(190, 134, 255);
 const CLAUDE_ORANGE: Color = Color::Rgb(222, 133, 93);
 const CODEX_GREEN: Color = Color::Rgb(104, 201, 154);
+const OPENCODE_CYAN: Color = Color::Rgb(103, 199, 209);
+const OMP_BLUE: Color = Color::Rgb(96, 165, 250);
+
+/// Width reserved for the tool name so the status and path columns line up.
+const TOOL_COLUMN: usize = 13;
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠇"];
+/// How long the loop waits for input before looking for finished probes.
+const TICK: Duration = Duration::from_millis(110);
+/// Below this the panes cannot show a usable amount of the profile.
+const MINIMUM_WIDTH: u16 = 60;
+const MINIMUM_HEIGHT: u16 = 20;
+/// The width at which every profile shortcut fits on one footer row.
+const WIDE_FOOTER_WIDTH: u16 = 76;
 
 pub enum UiAction {
     Launch {
@@ -54,10 +74,47 @@ enum Mode {
     },
 }
 
-#[derive(Clone, Copy)]
+/// Sign-in state for one profile. `None` means the probe is still running, so
+/// the interface can say "checking" instead of guessing.
+#[derive(Clone, Copy, Default)]
 struct ProfileAuth {
-    claude: AuthStatus,
-    codex: AuthStatus,
+    generation: u64,
+    claude: Option<AuthStatus>,
+    codex: Option<AuthStatus>,
+    opencode: Option<AuthStatus>,
+}
+
+impl ProfileAuth {
+    fn get(&self, tool: Tool) -> Option<AuthStatus> {
+        match tool {
+            Tool::Claude => self.claude,
+            Tool::Codex => self.codex,
+            Tool::Opencode => self.opencode,
+            Tool::Omp => None,
+        }
+    }
+
+    fn set(&mut self, tool: Tool, status: AuthStatus) {
+        match tool {
+            Tool::Claude => self.claude = Some(status),
+            Tool::Codex => self.codex = Some(status),
+            Tool::Opencode => self.opencode = Some(status),
+            Tool::Omp => {}
+        }
+    }
+
+    fn pending(&self) -> bool {
+        Tool::REPORTING.iter().any(|tool| self.get(*tool).is_none())
+    }
+}
+
+/// A finished sign-in probe. The generation lets a refresh discard answers
+/// that were already in flight when it started.
+struct Probe {
+    profile: String,
+    generation: u64,
+    tool: Tool,
+    status: AuthStatus,
 }
 
 struct App<'a> {
@@ -66,6 +123,10 @@ struct App<'a> {
     selected: usize,
     mode: Mode,
     auth: HashMap<String, ProfileAuth>,
+    generation: u64,
+    sender: Sender<Probe>,
+    receiver: Receiver<Probe>,
+    spinner: usize,
     has_auth_environment: bool,
 }
 
@@ -74,15 +135,20 @@ impl<'a> App<'a> {
         let selected = initial_profile
             .and_then(|name| profiles.iter().position(|profile| profile.name == name))
             .unwrap_or(0);
+        let (sender, receiver) = mpsc::channel();
         let mut app = Self {
             store,
             profiles,
             selected,
             mode: Mode::Browsing,
             auth: HashMap::new(),
+            generation: 0,
+            sender,
+            receiver,
+            spinner: 0,
             has_auth_environment: auth_environment_is_set(),
         };
-        app.refresh_selected_auth();
+        app.probe_selected();
         app
     }
 
@@ -91,32 +157,66 @@ impl<'a> App<'a> {
     }
 
     fn selected_auth(&self) -> ProfileAuth {
-        self.auth[&self.selected_profile().name]
+        self.auth
+            .get(&self.selected_profile().name)
+            .copied()
+            .unwrap_or_default()
     }
 
-    fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-        self.load_selected_auth();
-    }
-
-    fn move_down(&mut self) {
-        self.selected = (self.selected + 1).min(self.profiles.len() - 1);
-        self.load_selected_auth();
-    }
-
-    fn load_selected_auth(&mut self) {
+    fn move_to(&mut self, index: usize) {
+        let last = self.profiles.len().saturating_sub(1);
+        self.selected = index.min(last);
         if !self.auth.contains_key(&self.selected_profile().name) {
-            self.refresh_selected_auth();
+            self.probe_selected();
         }
     }
 
-    fn refresh_selected_auth(&mut self) {
-        let profile = self.selected_profile();
-        let status = ProfileAuth {
-            claude: launch::auth_status(Tool::Claude, profile),
-            codex: launch::auth_status(Tool::Codex, profile),
-        };
-        self.auth.insert(profile.name.clone(), status);
+    /// Asks each CLI about the selected profile on its own thread. The probes
+    /// spawn other programs, so running them inline would freeze the list
+    /// every time the cursor moves.
+    fn probe_selected(&mut self) {
+        let profile = self.selected_profile().clone();
+        self.generation += 1;
+        let generation = self.generation;
+        self.auth.insert(
+            profile.name.clone(),
+            ProfileAuth {
+                generation,
+                ..ProfileAuth::default()
+            },
+        );
+
+        for tool in Tool::REPORTING {
+            let sender = self.sender.clone();
+            let profile = profile.clone();
+            thread::spawn(move || {
+                let status = launch::auth_status(tool, &profile);
+                let _ = sender.send(Probe {
+                    profile: profile.name,
+                    generation,
+                    tool,
+                    status,
+                });
+            });
+        }
+    }
+
+    /// Collects finished probes. Returns whether anything on screen changed.
+    fn collect_probes(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(probe) = self.receiver.try_recv() {
+            if let Some(auth) = self.auth.get_mut(&probe.profile)
+                && auth.generation == probe.generation
+            {
+                auth.set(probe.tool, probe.status);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn waiting_on_probes(&self) -> bool {
+        self.selected_auth().pending()
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<Action> {
@@ -124,15 +224,36 @@ impl<'a> App<'a> {
             return Ok(Action::Continue);
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return Ok(Action::Quit);
+        }
+        // Held modifiers arrive as ordinary characters, so without this Ctrl-H
+        // would type an "h" into a name and Ctrl-C would launch Claude Code.
+        // Shift is exempt: it is how the sign-out shortcut is typed.
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return Ok(Action::Continue);
+        }
+
         match &mut self.mode {
             Mode::Browsing => Ok(match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_up();
+                    self.move_to(self.selected.saturating_sub(1));
                     Action::Continue
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_down();
+                    self.move_to(self.selected + 1);
+                    Action::Continue
+                }
+                KeyCode::Home => {
+                    self.move_to(0);
+                    Action::Continue
+                }
+                KeyCode::End => {
+                    self.move_to(usize::MAX);
                     Action::Continue
                 }
                 KeyCode::Char('n') => {
@@ -163,18 +284,20 @@ impl<'a> App<'a> {
                     };
                     Action::Continue
                 }
-                KeyCode::Char('o') => {
+                KeyCode::Char('L') => {
                     self.mode = Mode::ChoosingTool {
                         operation: AuthOperation::Logout,
                     };
                     Action::Continue
                 }
                 KeyCode::Char('r') => {
-                    self.refresh_selected_auth();
+                    self.probe_selected();
                     Action::Continue
                 }
                 KeyCode::Char('c') => Action::Launch(Tool::Claude),
                 KeyCode::Char('x') => Action::Launch(Tool::Codex),
+                KeyCode::Char('o') => Action::Launch(Tool::Opencode),
+                KeyCode::Char('p') => Action::Launch(Tool::Omp),
                 _ => Action::Continue,
             }),
             Mode::Creating { input, error } => match key.code {
@@ -184,14 +307,7 @@ impl<'a> App<'a> {
                 }
                 KeyCode::Enter => match self.store.create_profile(input) {
                     Ok(profile) => {
-                        self.profiles = self.store.list_profiles()?;
-                        self.selected = self
-                            .profiles
-                            .iter()
-                            .position(|candidate| candidate.name == profile.name)
-                            .unwrap_or(0);
-                        self.refresh_selected_auth();
-                        self.mode = Mode::Browsing;
+                        self.select_after_change(&profile.name)?;
                         Ok(Action::Continue)
                     }
                     Err(create_error) => {
@@ -220,24 +336,22 @@ impl<'a> App<'a> {
                     self.mode = Mode::Browsing;
                     Ok(Action::Continue)
                 }
-                KeyCode::Enter => match self.store.rename_profile(original, input) {
-                    Ok(profile) => {
-                        self.auth.remove(original);
-                        self.profiles = self.store.list_profiles()?;
-                        self.selected = self
-                            .profiles
-                            .iter()
-                            .position(|candidate| candidate.name == profile.name)
-                            .unwrap_or(0);
-                        self.refresh_selected_auth();
-                        self.mode = Mode::Browsing;
-                        Ok(Action::Continue)
+                KeyCode::Enter => {
+                    let original = original.clone();
+                    match self.store.rename_profile(&original, input) {
+                        Ok(profile) => {
+                            self.auth.remove(&original);
+                            self.select_after_change(&profile.name)?;
+                            Ok(Action::Continue)
+                        }
+                        Err(rename_error) => {
+                            if let Mode::Renaming { error, .. } = &mut self.mode {
+                                *error = Some(rename_error.to_string());
+                            }
+                            Ok(Action::Continue)
+                        }
                     }
-                    Err(rename_error) => {
-                        *error = Some(rename_error.to_string());
-                        Ok(Action::Continue)
-                    }
-                },
+                }
                 KeyCode::Backspace => {
                     input.pop();
                     *error = None;
@@ -266,6 +380,7 @@ impl<'a> App<'a> {
                     }
                     KeyCode::Char('c') => Tool::Claude,
                     KeyCode::Char('x') => Tool::Codex,
+                    KeyCode::Char('o') => Tool::Opencode,
                     _ => return Ok(Action::Continue),
                 };
                 if operation == AuthOperation::Logout {
@@ -289,26 +404,68 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Reloads the list after a create or rename and puts the cursor on the
+    /// profile the change produced.
+    fn select_after_change(&mut self, name: &str) -> Result<()> {
+        self.profiles = self.store.list_profiles()?;
+        self.selected = self
+            .profiles
+            .iter()
+            .position(|candidate| candidate.name == name)
+            .unwrap_or(0);
+        self.probe_selected();
+        self.mode = Mode::Browsing;
+        Ok(())
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let footer_height = if self.has_auth_environment { 6 } else { 5 };
+        if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
+            self.draw_too_small(frame, area);
+            return;
+        }
+
+        // The profile shortcuts need a second row before they would be cut off.
+        let narrow = area.width < WIDE_FOOTER_WIDTH;
+        let footer_height = 4 + u16::from(narrow) + u16::from(self.has_auth_environment);
         let sections = Layout::vertical([
             Constraint::Length(3),
-            Constraint::Min(12),
+            Constraint::Min(1),
             Constraint::Length(footer_height),
         ])
         .split(area);
 
         self.draw_header(frame, sections[0]);
         self.draw_profiles(frame, sections[1]);
-        self.draw_footer(frame, sections[2]);
+        self.draw_footer(frame, sections[2], narrow);
         self.draw_modal(frame, area);
+    }
+
+    fn draw_too_small(&self, frame: &mut Frame, area: Rect) {
+        let message = Paragraph::new(vec![
+            Line::styled("Ditto CLI", Style::new().fg(DITTO_PURPLE).bold()),
+            Line::default(),
+            Line::raw(format!(
+                "Resize to at least {MINIMUM_WIDTH}×{MINIMUM_HEIGHT}."
+            )),
+            Line::styled(
+                format!("This terminal is {}×{}.", area.width, area.height),
+                Style::new().fg(Color::DarkGray),
+            ),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+        frame.render_widget(Clear, area);
+        frame.render_widget(message, centered_rect(90, 4.min(area.height), area));
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let header = Paragraph::new(Line::from(vec![
             Span::styled("Ditto CLI", Style::new().fg(DITTO_PURPLE).bold()),
-            Span::raw("  choose a profile, then a tool"),
+            Span::styled(
+                "  choose a profile, then a tool",
+                Style::new().fg(Color::Gray),
+            ),
         ]))
         .alignment(Alignment::Center)
         .block(Block::bordered().border_style(Style::new().fg(DITTO_PURPLE)));
@@ -316,8 +473,7 @@ impl<'a> App<'a> {
     }
 
     fn draw_profiles(&self, frame: &mut Frame, area: Rect) {
-        let columns = Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
-            .split(area);
+        let columns = Layout::horizontal([Constraint::Length(26), Constraint::Min(30)]).split(area);
         let items = self.profiles.iter().map(|profile| {
             let suffix = if profile.managed { "" } else { "  existing" };
             ListItem::new(Line::from(vec![
@@ -337,35 +493,11 @@ impl<'a> App<'a> {
         let mut list_state = ListState::default().with_selected(Some(self.selected));
         frame.render_stateful_widget(profile_list, columns[0], &mut list_state);
 
-        let profile = self.selected_profile();
-        let auth = self.selected_auth();
-        let kind = if profile.managed {
-            "Isolated profile"
-        } else {
-            "Your existing Claude and Codex setup"
-        };
-        let details = Text::from(vec![
-            Line::from(vec![
-                Span::styled(&profile.name, Style::new().fg(DITTO_PURPLE).bold()),
-                Span::styled(format!("  {kind}"), Style::new().fg(Color::DarkGray)),
-            ]),
-            Line::default(),
-            Line::styled("Authentication", Style::new().bold()),
-            status_line(Tool::Claude, auth.claude),
-            status_line(Tool::Codex, auth.codex),
-            Line::default(),
-            Line::styled("Profile directories", Style::new().bold()),
-            Line::styled(
-                format!("Claude  {}", profile.claude_home.display()),
-                Style::new().fg(Color::DarkGray),
-            ),
-            Line::styled(
-                format!("Codex   {}", profile.codex_home.display()),
-                Style::new().fg(Color::DarkGray),
-            ),
-        ]);
+        // Deliberately unwrapped: a directory reflowed across three lines is
+        // harder to read than one that is shortened to fit.
+        let details = self.profile_details(columns[1].width.saturating_sub(2) as usize);
         frame.render_widget(
-            Paragraph::new(details).wrap(Wrap { trim: false }).block(
+            Paragraph::new(details).block(
                 Block::new()
                     .title(" Selected profile ")
                     .borders(Borders::ALL),
@@ -374,22 +506,87 @@ impl<'a> App<'a> {
         );
     }
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+    fn profile_details(&self, width: usize) -> Text<'static> {
+        let profile = self.selected_profile();
+        let auth = self.selected_auth();
+        let home = self.store.user_home();
+        let kind = if profile.managed {
+            "Isolated profile"
+        } else {
+            "Your existing setup"
+        };
+
         let mut lines = vec![
-            shortcut_line(&[
-                ("c", "open Claude", CLAUDE_ORANGE),
-                ("x", "open Codex", CODEX_GREEN),
-                ("l", "sign in", DITTO_PURPLE),
-                ("o", "sign out", Color::Yellow),
+            Line::from(vec![
+                Span::styled(profile.name.clone(), Style::new().fg(DITTO_PURPLE).bold()),
+                Span::styled(format!("  {kind}"), Style::new().fg(Color::DarkGray)),
             ]),
-            shortcut_line(&[
-                ("↑/↓", "select", DITTO_PURPLE),
-                ("n", "new profile", Color::White),
-                ("e", "rename", Color::White),
-                ("r", "refresh status", Color::White),
-                ("q", "quit", Color::White),
-            ]),
+            Line::default(),
+            Line::styled("Sign-in status", Style::new().bold()),
         ];
+        lines.extend(Tool::ALL.map(|tool| match tool {
+            // OMP signs in to each provider from its own prompt, so there
+            // is nothing for Ditto CLI to report.
+            Tool::Omp => tool_row(tool, "·", "Use /login inside OMP", Color::DarkGray),
+            _ => status_row(tool, auth.get(tool), self.spinner),
+        }));
+
+        lines.push(Line::default());
+        lines.push(Line::styled("Profile directories", Style::new().bold()));
+        lines.extend(Tool::ALL.map(|tool| {
+            let path = match tool {
+                Tool::Claude => profile.claude_home.clone(),
+                Tool::Codex => profile.codex_home.clone(),
+                Tool::Opencode => profile.opencode.data_dir(),
+                Tool::Omp => profile.omp_home.clone(),
+            };
+            let path = shorten_home(&path, home);
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<TOOL_COLUMN$}", tool.label()),
+                    Style::new().fg(tool_color(tool)),
+                ),
+                Span::styled(
+                    truncate_start(&path, width.saturating_sub(TOOL_COLUMN)),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ])
+        }));
+
+        if !profile.managed {
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Press n to create an isolated profile.",
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+
+        Text::from(lines)
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect, narrow: bool) {
+        const SELECT: (&str, &str, Color) = ("↑↓", "select", DITTO_PURPLE);
+        const NEW: (&str, &str, Color) = ("n", "new", Color::Gray);
+        const RENAME: (&str, &str, Color) = ("e", "rename", Color::Gray);
+        const SIGN_IN: (&str, &str, Color) = ("l", "sign in", Color::Gray);
+        const SIGN_OUT: (&str, &str, Color) = ("L", "sign out", Color::Gray);
+        const REFRESH: (&str, &str, Color) = ("r", "refresh", Color::Gray);
+        const QUIT: (&str, &str, Color) = ("q", "quit", Color::Gray);
+
+        let mut lines = vec![shortcut_line(&[
+            ("c", "Claude Code", CLAUDE_ORANGE),
+            ("x", "Codex", CODEX_GREEN),
+            ("o", "opencode", OPENCODE_CYAN),
+            ("p", "OMP", OMP_BLUE),
+        ])];
+        if narrow {
+            lines.push(shortcut_line(&[SELECT, NEW, RENAME, REFRESH]));
+            lines.push(shortcut_line(&[SIGN_IN, SIGN_OUT, QUIT]));
+        } else {
+            lines.push(shortcut_line(&[
+                SELECT, NEW, RENAME, SIGN_IN, SIGN_OUT, REFRESH, QUIT,
+            ]));
+        }
         if self.has_auth_environment {
             lines.push(Line::styled(
                 "An API-key environment variable is set and may override the saved login.",
@@ -399,7 +596,7 @@ impl<'a> App<'a> {
         frame.render_widget(
             Paragraph::new(lines)
                 .alignment(Alignment::Center)
-                .block(Block::bordered()),
+                .block(Block::bordered().border_style(Style::new().fg(Color::DarkGray))),
             area,
         );
     }
@@ -408,7 +605,6 @@ impl<'a> App<'a> {
         match &self.mode {
             Mode::Browsing => {}
             Mode::Creating { input, error } => {
-                let popup = centered_rect(64, 8, area);
                 let mut lines = vec![
                     Line::raw("Use letters, numbers, '-' or '_'."),
                     Line::styled(format!("> {input}"), Style::new().fg(DITTO_PURPLE).bold()),
@@ -419,16 +615,15 @@ impl<'a> App<'a> {
                     ),
                 ];
                 if let Some(error) = error {
-                    lines[2] = Line::styled(error, Style::new().fg(Color::Red));
+                    lines[2] = Line::styled(error.clone(), Style::new().fg(Color::Red));
                 }
-                render_popup(frame, popup, " New profile ", lines);
+                render_popup(frame, centered_rect(64, 8, area), " New profile ", lines);
             }
             Mode::Renaming {
                 original,
                 input,
                 error,
             } => {
-                let popup = centered_rect(64, 8, area);
                 let mut lines = vec![
                     Line::raw(format!("New name for '{original}':")),
                     Line::styled(format!("> {input}"), Style::new().fg(DITTO_PURPLE).bold()),
@@ -439,36 +634,42 @@ impl<'a> App<'a> {
                     ),
                 ];
                 if let Some(error) = error {
-                    lines[2] = Line::styled(error, Style::new().fg(Color::Red));
+                    lines[2] = Line::styled(error.clone(), Style::new().fg(Color::Red));
                 }
-                render_popup(frame, popup, " Rename profile ", lines);
+                render_popup(frame, centered_rect(64, 8, area), " Rename profile ", lines);
             }
             Mode::Notice { title, message } => {
-                let popup = centered_rect(64, 7, area);
                 let lines = vec![
                     Line::raw(*message),
                     Line::default(),
                     Line::styled("Enter or Esc close", Style::new().fg(Color::DarkGray)),
                 ];
-                render_popup(frame, popup, title, lines);
+                render_popup(frame, centered_rect(64, 7, area), title, lines);
             }
             Mode::ChoosingTool { operation } => {
-                let popup = centered_rect(58, 8, area);
-                let profile = self.selected_profile();
                 let lines = vec![
-                    Line::raw(format!("{} to '{}' with:", operation.label(), profile.name)),
+                    Line::raw(format!(
+                        "{} to '{}' with:",
+                        operation.label(),
+                        self.selected_profile().name
+                    )),
                     Line::default(),
                     shortcut_line(&[
                         ("c", "Claude Code", CLAUDE_ORANGE),
                         ("x", "Codex", CODEX_GREEN),
+                        ("o", "opencode", OPENCODE_CYAN),
                     ]),
                     Line::default(),
                     Line::styled("Esc cancel", Style::new().fg(Color::DarkGray)),
                 ];
-                render_popup(frame, popup, &format!(" {} ", operation.label()), lines);
+                render_popup(
+                    frame,
+                    centered_rect(62, 8, area),
+                    &format!(" {} ", operation.label()),
+                    lines,
+                );
             }
             Mode::ConfirmingLogout { tool } => {
-                let popup = centered_rect(58, 7, area);
                 let lines = vec![
                     Line::raw(format!(
                         "Sign out of {} for '{}'?",
@@ -481,7 +682,12 @@ impl<'a> App<'a> {
                         Style::new().fg(Color::Yellow),
                     ),
                 ];
-                render_popup(frame, popup, " Confirm sign out ", lines);
+                render_popup(
+                    frame,
+                    centered_rect(62, 7, area),
+                    " Confirm sign out ",
+                    lines,
+                );
             }
         }
     }
@@ -511,23 +717,46 @@ pub fn run(
 }
 
 fn run_loop(terminal: &mut DefaultTerminal, mut app: App<'_>) -> Result<Option<UiAction>> {
+    let mut dirty = true;
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
-        if let Event::Key(key) = event::read()? {
-            let action = match app.handle_key(key)? {
-                Action::Continue => continue,
-                Action::Quit => return Ok(None),
-                Action::Launch(tool) => UiAction::Launch {
-                    tool,
-                    profile: app.selected_profile().clone(),
-                },
-                Action::Authenticate { operation, tool } => UiAction::Authenticate {
-                    operation,
-                    tool,
-                    profile: app.selected_profile().clone(),
-                },
-            };
-            return Ok(Some(action));
+        if dirty {
+            terminal.draw(|frame| app.draw(frame))?;
+            dirty = false;
+        }
+
+        if event::poll(TICK)? {
+            match event::read()? {
+                Event::Key(key) => {
+                    match app.handle_key(key)? {
+                        Action::Continue => {}
+                        Action::Quit => return Ok(None),
+                        Action::Launch(tool) => {
+                            return Ok(Some(UiAction::Launch {
+                                tool,
+                                profile: app.selected_profile().clone(),
+                            }));
+                        }
+                        Action::Authenticate { operation, tool } => {
+                            return Ok(Some(UiAction::Authenticate {
+                                operation,
+                                tool,
+                                profile: app.selected_profile().clone(),
+                            }));
+                        }
+                    }
+                    dirty = true;
+                }
+                Event::Resize(..) => dirty = true,
+                _ => {}
+            }
+        } else if app.waiting_on_probes() {
+            // Only animate while something is actually being waited on.
+            app.spinner = app.spinner.wrapping_add(1);
+            dirty = true;
+        }
+
+        if app.collect_probes() {
+            dirty = true;
         }
     }
 }
@@ -540,27 +769,71 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn status_line(tool: Tool, status: AuthStatus) -> Line<'static> {
-    let (symbol, label, color) = match status {
-        AuthStatus::SignedIn => ("●", "Signed in", Color::Green),
-        AuthStatus::SignedOut => ("○", "Sign in required", Color::Yellow),
-        AuthStatus::Unavailable => ("?", "CLI or status unavailable", Color::Red),
-    };
-    let tool_color = match tool {
+fn tool_color(tool: Tool) -> Color {
+    match tool {
         Tool::Claude => CLAUDE_ORANGE,
         Tool::Codex => CODEX_GREEN,
-    };
+        Tool::Opencode => OPENCODE_CYAN,
+        Tool::Omp => OMP_BLUE,
+    }
+}
+
+/// One row of the tool table: the tool in its own colour, then its state.
+fn tool_row(tool: Tool, symbol: &str, label: &str, state_color: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{:<13}", tool.label()), Style::new().fg(tool_color)),
-        Span::styled(format!("{symbol} {label}"), Style::new().fg(color)),
+        Span::styled(
+            format!("{:<TOOL_COLUMN$}", tool.label()),
+            Style::new().fg(tool_color(tool)),
+        ),
+        Span::styled(format!("{symbol} {label}"), Style::new().fg(state_color)),
     ])
 }
 
+fn status_row(tool: Tool, status: Option<AuthStatus>, spinner: usize) -> Line<'static> {
+    let (symbol, label, color) = match status {
+        None => (
+            SPINNER[spinner % SPINNER.len()],
+            "Checking",
+            Color::DarkGray,
+        ),
+        Some(AuthStatus::SignedIn) => ("●", "Signed in", Color::Green),
+        Some(AuthStatus::SignedOut) => ("○", "Sign in required", Color::Yellow),
+        // A CLI that is simply not installed is not an error worth alarming
+        // about, so this stays quiet rather than red.
+        Some(AuthStatus::Unavailable) => ("–", "Not available", Color::DarkGray),
+    };
+    tool_row(tool, symbol, label, color)
+}
+
+/// Paths are long enough to wrap the detail pane, so the home directory is
+/// abbreviated the way a shell prompt would.
+fn shorten_home(path: &Path, user_home: &Path) -> String {
+    match path.strip_prefix(user_home) {
+        Ok(relative) => format!("~/{}", relative.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// Drops characters from the front of a path. The tail names the profile and
+/// the tool, which is the part worth keeping; the head repeats on every row.
+fn truncate_start(text: &str, budget: usize) -> String {
+    let length = text.chars().count();
+    if length <= budget {
+        return text.to_owned();
+    }
+    if budget <= 1 {
+        return "…".repeat(budget);
+    }
+    let mut truncated = String::from("…");
+    truncated.extend(text.chars().skip(length - budget + 1));
+    truncated
+}
+
 fn shortcut_line(shortcuts: &[(&str, &str, Color)]) -> Line<'static> {
-    let mut spans = Vec::with_capacity(shortcuts.len() * 2);
+    let mut spans = Vec::with_capacity(shortcuts.len() * 3);
     for (index, (key, label, color)) in shortcuts.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("    "));
+            spans.push(Span::styled(" · ", Style::new().fg(Color::DarkGray)));
         }
         spans.push(Span::styled(
             (*key).to_owned(),
@@ -571,12 +844,12 @@ fn shortcut_line(shortcuts: &[(&str, &str, Color)]) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'_>>) {
+fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::new()
-                .title(title)
+                .title(title.to_owned())
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(DITTO_PURPLE)),
         ),
@@ -598,7 +871,57 @@ fn auth_environment_is_set() -> bool {
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "OPENAI_API_KEY",
+        "OPENCODE_API_KEY",
     ]
     .iter()
     .any(|name| env::var_os(name).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn abbreviates_paths_inside_the_home_directory() {
+        let home = PathBuf::from("/Users/rey");
+        assert_eq!(
+            shorten_home(&home.join(".ditto/profiles/work/claude"), &home),
+            "~/.ditto/profiles/work/claude"
+        );
+        assert_eq!(
+            shorten_home(Path::new("/opt/shared/claude"), &home),
+            "/opt/shared/claude"
+        );
+    }
+
+    #[test]
+    fn keeps_the_tail_of_a_path_that_does_not_fit() {
+        assert_eq!(
+            truncate_start("~/.ditto/work/claude", 40),
+            "~/.ditto/work/claude"
+        );
+        assert_eq!(truncate_start("~/.ditto/work/claude", 12), "…work/claude");
+        assert_eq!(truncate_start("abc", 1), "…");
+        assert_eq!(truncate_start("abc", 0), "");
+        // Multi-byte characters must not be split mid-character.
+        assert_eq!(truncate_start("→→→→", 3), "…→→");
+    }
+
+    #[test]
+    fn reports_probes_as_pending_until_every_tool_answers() {
+        let mut auth = ProfileAuth::default();
+        assert!(auth.pending());
+
+        auth.set(Tool::Claude, AuthStatus::SignedIn);
+        auth.set(Tool::Codex, AuthStatus::SignedOut);
+        assert!(auth.pending());
+
+        auth.set(Tool::Opencode, AuthStatus::SignedIn);
+        assert!(!auth.pending());
+        assert_eq!(auth.get(Tool::Opencode), Some(AuthStatus::SignedIn));
+        // OMP never reports, so it must not hold the spinner open.
+        assert_eq!(auth.get(Tool::Omp), None);
+    }
 }

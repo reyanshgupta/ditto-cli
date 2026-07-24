@@ -16,13 +16,73 @@ pub struct Profile {
     pub name: String,
     pub claude_home: PathBuf,
     pub codex_home: PathBuf,
+    pub omp_home: PathBuf,
+    pub opencode: OpencodeHome,
     pub managed: bool,
+}
+
+/// opencode has no single home variable. It resolves its directories from the
+/// XDG base variables, so a profile pins the three bases that carry
+/// credentials, configuration, and session state. The shared cache is left
+/// alone: it holds downloaded tooling rather than anything account specific.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpencodeHome {
+    pub data: PathBuf,
+    pub config: PathBuf,
+    pub state: PathBuf,
+}
+
+impl OpencodeHome {
+    /// The directories opencode itself creates: it appends its own name to
+    /// every XDG base it reads.
+    pub fn data_dir(&self) -> PathBuf {
+        self.data.join("opencode")
+    }
+
+    pub fn config_dir(&self) -> PathBuf {
+        self.config.join("opencode")
+    }
+
+    fn isolated(root: &Path) -> Self {
+        Self {
+            data: root.join("data"),
+            config: root.join("config"),
+            state: root.join("state"),
+        }
+    }
+
+    fn native(user_home: &Path) -> Self {
+        Self {
+            data: user_home.join(".local").join("share"),
+            config: user_home.join(".config"),
+            state: user_home.join(".local").join("state"),
+        }
+    }
+
+    fn from_environment(user_home: &Path) -> Self {
+        let native = Self::native(user_home);
+        Self {
+            data: xdg_base("XDG_DATA_HOME", native.data),
+            config: xdg_base("XDG_CONFIG_HOME", native.config),
+            state: xdg_base("XDG_STATE_HOME", native.state),
+        }
+    }
+}
+
+/// The XDG specification requires relative base paths to be ignored, which is
+/// what opencode does too.
+fn xdg_base(variable: &str, fallback: PathBuf) -> PathBuf {
+    env::var_os(variable)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or(fallback)
 }
 
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
     user_home: PathBuf,
+    native_opencode: OpencodeHome,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -38,12 +98,26 @@ impl Store {
             .map(PathBuf::from)
             .unwrap_or_else(|| user_home.join(".ditto"));
 
-        Ok(Self { root, user_home })
+        let native_opencode = OpencodeHome::from_environment(&user_home);
+        Ok(Self {
+            root,
+            user_home,
+            native_opencode,
+        })
     }
 
     #[cfg(test)]
     pub fn new(root: PathBuf, user_home: PathBuf) -> Self {
-        Self { root, user_home }
+        let native_opencode = OpencodeHome::native(&user_home);
+        Self {
+            root,
+            user_home,
+            native_opencode,
+        }
+    }
+
+    pub fn user_home(&self) -> &Path {
+        &self.user_home
     }
 
     pub fn list_profiles(&self) -> Result<Vec<Profile>> {
@@ -84,14 +158,26 @@ impl Store {
         fs::create_dir(&profile_root)
             .with_context(|| format!("profile '{name}' already exists or could not be created"))?;
 
+        // Parents come before children so every level is created and locked
+        // down before the CLIs get a chance to write credentials into it.
+        let opencode_root = self.opencode_root(name);
+        let directories = [
+            profile.claude_home.as_path(),
+            profile.codex_home.as_path(),
+            opencode_root.as_path(),
+            profile.opencode.data.as_path(),
+            profile.opencode.config.as_path(),
+            profile.opencode.state.as_path(),
+        ];
+
         let result = (|| {
             secure_directory(&profile_root)?;
-            fs::create_dir(&profile.claude_home)
-                .with_context(|| format!("could not create {}", profile.claude_home.display()))?;
-            secure_directory(&profile.claude_home)?;
-            fs::create_dir(&profile.codex_home)
-                .with_context(|| format!("could not create {}", profile.codex_home.display()))?;
-            secure_directory(&profile.codex_home)
+            for directory in directories {
+                fs::create_dir(directory)
+                    .with_context(|| format!("could not create {}", directory.display()))?;
+                secure_directory(directory)?;
+            }
+            Ok(())
         })();
 
         if let Err(error) = result {
@@ -124,14 +210,40 @@ impl Store {
             bail!("profile '{new_name}' already exists");
         }
 
+        let omp_source = self.omp_profile_root(current_name);
+        let omp_destination = self.omp_profile_root(new_name);
+        let move_omp_profile = omp_source.exists();
+        if move_omp_profile && omp_destination.exists() {
+            bail!("OMP profile '{new_name}' already exists");
+        }
+
         let was_selected = self.last_profile()?.as_deref() == Some(current_name);
         fs::rename(&source, &destination).with_context(|| {
             format!("could not rename profile '{current_name}' to '{new_name}'")
         })?;
 
+        if move_omp_profile {
+            if let Err(omp_error) = fs::rename(&omp_source, &omp_destination) {
+                if let Err(rollback_error) = fs::rename(&destination, &source) {
+                    bail!(
+                        "could not rename OMP profile '{current_name}' to '{new_name}': \
+                         {omp_error}; Ditto rollback also failed: {rollback_error}"
+                    );
+                }
+                return Err(omp_error).with_context(|| {
+                    format!("could not rename OMP profile '{current_name}' to '{new_name}'")
+                });
+            }
+        }
+
         if was_selected {
             if let Err(state_error) = self.save_last_profile(new_name) {
-                if let Err(rollback_error) = fs::rename(&destination, &source) {
+                let omp_rollback_error = move_omp_profile
+                    .then(|| fs::rename(&omp_destination, &omp_source).err())
+                    .flatten();
+                let ditto_rollback_error = fs::rename(&destination, &source).err();
+
+                if let Some(rollback_error) = omp_rollback_error.or(ditto_rollback_error) {
                     bail!(
                         "profile was renamed, but the selected profile could not be updated: \
                          {state_error:#}; rollback also failed: {rollback_error}"
@@ -205,6 +317,8 @@ impl Store {
             name: DEFAULT_PROFILE.to_owned(),
             claude_home: self.user_home.join(".claude"),
             codex_home: self.user_home.join(".codex"),
+            omp_home: self.user_home.join(".omp").join("agent"),
+            opencode: self.native_opencode.clone(),
             managed: false,
         }
     }
@@ -215,6 +329,8 @@ impl Store {
             name: name.to_owned(),
             claude_home: root.join("claude"),
             codex_home: root.join("codex"),
+            omp_home: self.omp_profile_root(name).join("agent"),
+            opencode: OpencodeHome::isolated(&self.opencode_root(name)),
             managed: true,
         }
     }
@@ -225,6 +341,13 @@ impl Store {
 
     fn profile_root(&self, name: &str) -> PathBuf {
         self.profiles_root().join(name)
+    }
+    fn omp_profile_root(&self, name: &str) -> PathBuf {
+        self.user_home.join(".omp").join("profiles").join(name)
+    }
+
+    fn opencode_root(&self, name: &str) -> PathBuf {
+        self.profile_root(name).join("opencode")
     }
 
     fn state_path(&self) -> PathBuf {
@@ -300,6 +423,9 @@ mod tests {
         let profile = store.create_profile("work")?;
         assert!(profile.claude_home.is_dir());
         assert!(profile.codex_home.is_dir());
+        assert!(profile.opencode.data.is_dir());
+        assert!(profile.opencode.config.is_dir());
+        assert!(profile.opencode.state.is_dir());
         assert!(store.create_profile("work").is_err());
 
         store.save_last_profile("work")?;
@@ -316,6 +442,36 @@ mod tests {
     }
 
     #[test]
+    fn separates_opencode_xdg_bases_per_profile() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let home = temporary.path().join("home");
+        let store = Store::new(temporary.path().join("ditto"), home.clone());
+        let work = store.create_profile("work")?;
+        let personal = store.create_profile("personal")?;
+
+        // opencode appends its own name to each base, so distinct bases are
+        // what keeps two profiles from sharing one auth.json.
+        assert_ne!(work.opencode.data_dir(), personal.opencode.data_dir());
+        assert_ne!(work.opencode.data_dir(), work.opencode.config_dir());
+        assert!(
+            work.opencode
+                .data_dir()
+                .starts_with(work.claude_home.parent().unwrap())
+        );
+
+        let default = store.load_profile(DEFAULT_PROFILE)?;
+        assert_eq!(
+            default.opencode.data_dir(),
+            home.join(".local").join("share").join("opencode")
+        );
+        assert_eq!(
+            default.opencode.config_dir(),
+            home.join(".config").join("opencode")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn renames_profile_data_and_selected_state() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let store = Store::new(
@@ -324,6 +480,10 @@ mod tests {
         );
         let original = store.create_profile("work")?;
         std::fs::write(original.claude_home.join("marker"), "kept")?;
+        std::fs::create_dir_all(original.opencode.data_dir())?;
+        std::fs::write(original.opencode.data_dir().join("auth.json"), "kept")?;
+        std::fs::create_dir_all(&original.omp_home)?;
+        std::fs::write(original.omp_home.join("marker"), "kept")?;
         store.save_last_profile("work")?;
 
         let renamed = store.rename_profile("work", "client")?;
@@ -331,6 +491,14 @@ mod tests {
         assert_eq!(renamed.name, "client");
         assert_eq!(
             std::fs::read_to_string(renamed.claude_home.join("marker"))?,
+            "kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(renamed.opencode.data_dir().join("auth.json"))?,
+            "kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(renamed.omp_home.join("marker"))?,
             "kept"
         );
         assert!(store.load_profile("work").is_err());

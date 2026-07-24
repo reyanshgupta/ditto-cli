@@ -2,6 +2,7 @@ mod cli;
 mod launch;
 mod profile;
 mod ui;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
@@ -30,6 +31,9 @@ fn run() -> Result<()> {
         Some(Command::Paths { profile }) => show_paths(&store, profile.as_deref()),
         Some(Command::Claude(arguments)) => launch_direct(&store, Tool::Claude, arguments),
         Some(Command::Codex(arguments)) => launch_direct(&store, Tool::Codex, arguments),
+        Some(Command::Opencode(arguments)) => launch_direct(&store, Tool::Opencode, arguments),
+        Some(Command::Omp(arguments)) => launch_direct(&store, Tool::Omp, arguments),
+        Some(Command::Update(arguments)) => update::run(arguments.check, arguments.git),
     }
 }
 
@@ -78,8 +82,10 @@ fn list_profiles(store: &Store) -> Result<()> {
 fn show_status(store: &Store, requested_profile: Option<&str>) -> Result<()> {
     let profile = resolve_profile(store, requested_profile)?;
     println!("{}", profile.name);
-    print_auth_status(Tool::Claude, launch::auth_status(Tool::Claude, &profile));
-    print_auth_status(Tool::Codex, launch::auth_status(Tool::Codex, &profile));
+    for tool in Tool::REPORTING {
+        print_auth_status(tool, launch::auth_status(tool, &profile));
+    }
+    println!("  {:<13} use /login inside OMP", Tool::Omp.label());
     Ok(())
 }
 
@@ -109,6 +115,12 @@ fn show_paths(store: &Store, requested_profile: Option<&str>) -> Result<()> {
     println!("profile={}", profile.name);
     println!("claude={}", profile.claude_home.display());
     println!("codex={}", profile.codex_home.display());
+    println!("opencode={}", profile.opencode.data_dir().display());
+    println!(
+        "opencode-config={}",
+        profile.opencode.config_dir().display()
+    );
+    println!("omp={}", profile.omp_home.display());
     Ok(())
 }
 
@@ -138,4 +150,8 @@ fn print_login_instructions(profile: &Profile) {
     println!("Or authenticate directly:");
     println!("  ditto-cli claude {} -- auth login", profile.name);
     println!("  ditto-cli codex {} -- login", profile.name);
+    println!("  ditto-cli opencode {} -- auth login", profile.name);
+    println!();
+    println!("Launch OMP, then use `/login` for each subscription provider:");
+    println!("  ditto-cli omp {}", profile.name);
 }

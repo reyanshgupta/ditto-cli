@@ -68,18 +68,31 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Asked of the registry directly. `cargo info` resolves the checked out
+      # package instead, and because the tag always matches the crate version
+      # it reported every release as already published and skipped it.
       - name: Check publication status
         id: published
         shell: bash
         env:
           CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
         run: |
-          if cargo info "ditto-cli@${CRATE_VERSION}" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "ditto-cli ${CRATE_VERSION} is already published"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'User-Agent: ditto-cli release workflow' \
+            "https://crates.io/api/v1/crates/ditto-cli/${CRATE_VERSION}")"
+          case "${status}" in
+            200)
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "ditto-cli ${CRATE_VERSION} is already published"
+              ;;
+            404)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::crates.io answered ${status} for ditto-cli ${CRATE_VERSION}"
+              exit 1
+              ;;
+          esac
 
       - name: Authenticate with crates.io
         if: steps.published.outputs.exists != 'true'

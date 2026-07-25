@@ -165,6 +165,11 @@ ditto-cli codex client-a
 ditto-cli opencode client-a
 ditto-cli omp client-a
 
+# Short aliases
+ditto-cli cc client-a       # Claude Code
+ditto-cli cx client-a       # Codex
+ditto-cli oc client-a       # opencode
+
 # Pass arguments to the underlying CLI after --
 ditto-cli claude client-a -- --model opus
 ditto-cli codex client-a -- --search

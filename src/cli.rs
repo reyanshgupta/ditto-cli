@@ -40,10 +40,13 @@ pub enum Command {
         profile: Option<String>,
     },
     /// Launch Claude Code.
+    #[command(visible_alias = "cc")]
     Claude(LaunchArgs),
     /// Launch Codex.
+    #[command(visible_alias = "cx")]
     Codex(LaunchArgs),
     /// Launch opencode.
+    #[command(visible_alias = "oc")]
     Opencode(LaunchArgs),
     /// Launch Oh My Pi.
     Omp(LaunchArgs),
@@ -127,6 +130,31 @@ mod tests {
                         OsString::from("--model"),
                         OsString::from("anthropic/claude-opus-5"),
                     ]
+        ));
+    }
+
+    #[test]
+    fn parses_short_launch_aliases() {
+        let claude = Cli::try_parse_from(["ditto-cli", "cc", "work"]).unwrap();
+        assert!(matches!(
+            claude.command,
+            Some(Command::Claude(LaunchArgs { profile, args }))
+                if profile.as_deref() == Some("work") && args.is_empty()
+        ));
+
+        let codex = Cli::try_parse_from(["ditto-cli", "cx", "work"]).unwrap();
+        assert!(matches!(
+            codex.command,
+            Some(Command::Codex(LaunchArgs { profile, .. })) if profile.as_deref() == Some("work")
+        ));
+
+        let opencode =
+            Cli::try_parse_from(["ditto-cli", "oc", "work", "--", "--model", "opus"]).unwrap();
+        assert!(matches!(
+            opencode.command,
+            Some(Command::Opencode(LaunchArgs { profile, args }))
+                if profile.as_deref() == Some("work")
+                    && args == [OsString::from("--model"), OsString::from("opus")]
         ));
     }
 

@@ -281,9 +281,15 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
     command
 }
 
+/// Set to step out of the way and hand the terminal straight to the tool. The
+/// title stops naming the profile, which is the price of a way out if running
+/// underneath Ditto ever causes trouble.
+const NO_PROXY_VARIABLE: &str = "DITTO_NO_PROXY";
+
 /// Puts the profile in front of the user before the tool takes the terminal.
 /// Claude Code gets a status line inside its own interface; the rest get the
 /// window title.
+#[cfg(not(unix))]
 fn show_profile(tool: Tool, profile: &Profile) {
     if tool == Tool::Claude {
         indicator::enable_quietly(profile);
@@ -291,11 +297,40 @@ fn show_profile(tool: Tool, profile: &Profile) {
     indicator::announce(tool, profile);
 }
 
+/// Whether the tool should run underneath Ditto rather than replace it.
+/// Rewriting the title only means anything on a real terminal, so redirected
+/// output is handed over untouched.
+#[cfg(unix)]
+fn proxy_wanted() -> bool {
+    use std::io::IsTerminal;
+
+    std::env::var_os(NO_PROXY_VARIABLE).is_none()
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+}
+
 #[cfg(unix)]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    show_profile(tool, profile);
+    if tool == Tool::Claude {
+        indicator::enable_quietly(profile);
+    }
+
+    if proxy_wanted() {
+        // A pseudoterminal that cannot be opened is no reason to refuse to
+        // launch. Handing the terminal over directly costs the profile in the
+        // title and nothing else.
+        match crate::proxy::run(tool, profile, args) {
+            Ok(status) => std::process::exit(crate::proxy::exit_code(status)),
+            Err(error) => {
+                eprintln!("ditto-cli: {error:#}");
+                eprintln!("ditto-cli: launching {} directly", tool.label());
+            }
+        }
+    }
+
+    indicator::announce(tool, profile);
     let error = build_command(tool, profile, args).exec();
     Err(error).with_context(|| format!("could not launch {}", tool.label()))
 }

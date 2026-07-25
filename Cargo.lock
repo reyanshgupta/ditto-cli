@@ -426,6 +426,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "libc",
  "ratatui",
  "rusqlite",
  "serde",

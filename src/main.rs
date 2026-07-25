@@ -2,6 +2,8 @@ mod cli;
 mod indicator;
 mod launch;
 mod profile;
+#[cfg(unix)]
+mod proxy;
 mod ui;
 mod update;
 

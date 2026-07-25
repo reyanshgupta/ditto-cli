@@ -90,10 +90,9 @@ fn list_profiles(store: &Store) -> Result<()> {
 fn show_status(store: &Store, requested_profile: Option<&str>) -> Result<()> {
     let profile = resolve_profile(store, requested_profile)?;
     println!("{}", profile.name);
-    for tool in Tool::REPORTING {
+    for tool in Tool::ALL {
         print_auth_status(tool, launch::auth_status(tool, &profile));
     }
-    println!("  {:<13} use /login inside OMP", Tool::Omp.label());
     Ok(())
 }
 

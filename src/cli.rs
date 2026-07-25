@@ -17,7 +17,7 @@ pub struct Cli {
 pub enum Command {
     /// List available profiles.
     List,
-    /// Show Claude Code, Codex, and opencode authentication status.
+    /// Show Claude Code, Codex, opencode, and OMP authentication status.
     Status {
         /// Profile name. Uses the last selected profile when omitted.
         profile: Option<String>,

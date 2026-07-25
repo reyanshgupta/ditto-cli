@@ -110,6 +110,7 @@ struct ProfileAuth {
     claude: Option<AuthStatus>,
     codex: Option<AuthStatus>,
     opencode: Option<AuthStatus>,
+    omp: Option<AuthStatus>,
 }
 
 impl ProfileAuth {
@@ -118,7 +119,7 @@ impl ProfileAuth {
             Tool::Claude => self.claude,
             Tool::Codex => self.codex,
             Tool::Opencode => self.opencode,
-            Tool::Omp => None,
+            Tool::Omp => self.omp,
         }
     }
 
@@ -127,12 +128,12 @@ impl ProfileAuth {
             Tool::Claude => self.claude = Some(status),
             Tool::Codex => self.codex = Some(status),
             Tool::Opencode => self.opencode = Some(status),
-            Tool::Omp => {}
+            Tool::Omp => self.omp = Some(status),
         }
     }
 
     fn pending(&self) -> bool {
-        Tool::REPORTING.iter().any(|tool| self.get(*tool).is_none())
+        Tool::ALL.iter().any(|tool| self.get(*tool).is_none())
     }
 }
 
@@ -221,7 +222,7 @@ impl<'a> App<'a> {
             },
         );
 
-        for tool in Tool::REPORTING {
+        for tool in Tool::ALL {
             let sender = self.sender.clone();
             let profile = profile.clone();
             thread::spawn(move || {
@@ -592,14 +593,16 @@ impl<'a> App<'a> {
                 Span::styled(format!("  {kind}"), Style::new().fg(Color::DarkGray)),
             ]),
             Line::default(),
-            Line::styled("Sign-in status", Style::new().bold()),
         ];
-        lines.extend(Tool::ALL.map(|tool| match tool {
-            // OMP signs in to each provider from its own prompt, so there
-            // is nothing for Ditto CLI to report.
-            Tool::Omp => tool_row(tool, "·", "Use /login inside OMP", Color::DarkGray),
-            _ => status_row(tool, auth.get(tool), self.spinner),
-        }));
+        if self.is_default(&profile.name) {
+            lines.push(Line::styled(
+                format!("{DEFAULT_MARK} Used when no profile is named"),
+                Style::new().fg(Color::Yellow),
+            ));
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled("Sign-in status", Style::new().bold()));
+        lines.extend(Tool::ALL.map(|tool| status_row(tool, auth.get(tool), self.spinner)));
 
         lines.push(Line::default());
         lines.push(Line::styled("Profile directories", Style::new().bold()));
@@ -714,11 +717,18 @@ impl<'a> App<'a> {
                         ("o", "opencode", OPENCODE_CYAN),
                     ]),
                     Line::default(),
+                    // OMP is missing above on purpose: Ditto CLI can read its
+                    // sign-in state but has no command to change it.
+                    Line::styled(
+                        "OMP signs in and out from its own prompt.",
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                    Line::default(),
                     Line::styled("Esc cancel", Style::new().fg(Color::DarkGray)),
                 ];
                 render_popup(
                     frame,
-                    centered_rect(62, 8, area),
+                    centered_rect(62, 10, area),
                     &format!(" {} ", operation.label()),
                     lines,
                 );
@@ -996,9 +1006,13 @@ mod tests {
         assert!(auth.pending());
 
         auth.set(Tool::Opencode, AuthStatus::SignedIn);
+        // OMP reports like the rest, so it holds the spinner open until it
+        // answers.
+        assert!(auth.pending());
+
+        auth.set(Tool::Omp, AuthStatus::SignedOut);
         assert!(!auth.pending());
         assert_eq!(auth.get(Tool::Opencode), Some(AuthStatus::SignedIn));
-        // OMP never reports, so it must not hold the spinner open.
-        assert_eq!(auth.get(Tool::Omp), None);
+        assert_eq!(auth.get(Tool::Omp), Some(AuthStatus::SignedOut));
     }
 }

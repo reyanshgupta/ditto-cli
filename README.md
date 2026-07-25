@@ -159,7 +159,7 @@ The TUI is optional. Every launch command works directly from the shell:
 ditto-cli create work
 ditto-cli rename work client-a
 ditto-cli list
-ditto-cli status client-a   # sign-in state for Claude Code, Codex, and opencode
+ditto-cli status client-a   # sign-in state for all four tools
 ditto-cli paths client-a
 
 # Ditto CLI itself

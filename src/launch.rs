@@ -1,12 +1,19 @@
 use std::{
     ffi::OsString,
+    path::Path,
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
 use crate::profile::Profile;
+
+/// OMP's per-profile store. It holds credentials alongside sessions and
+/// settings, so it lives inside the profile's agent directory.
+const OMP_DATABASE: &str = "agent.db";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Tool {
@@ -19,10 +26,6 @@ pub enum Tool {
 impl Tool {
     /// Every tool Ditto CLI can launch, in the order they are presented.
     pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Opencode, Self::Omp];
-
-    /// The tools that report sign-in state to a machine. OMP keeps its
-    /// credentials behind its own `/login` prompt, so it is asked nothing.
-    pub const REPORTING: [Self; 3] = [Self::Claude, Self::Codex, Self::Opencode];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -71,6 +74,9 @@ impl AuthOperation {
             (Self::Logout, Tool::Claude) => Some(&["auth", "logout"]),
             (Self::Logout, Tool::Codex) => Some(&["logout"]),
             (Self::Logout, Tool::Opencode) => Some(&["auth", "logout"]),
+            // OMP authenticates from its own prompt and exposes no command for
+            // it. Its sign-in state is still readable, so it reports status
+            // without being signable in or out here.
             (_, Tool::Omp) => None,
         }
     }
@@ -100,7 +106,9 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
         Tool::Claude => &["auth", "status", "--json"],
         Tool::Codex => &["login", "status"],
         Tool::Opencode => &["auth", "list"],
-        Tool::Omp => return AuthStatus::Unavailable,
+        // OMP has no status command to ask. `/login` writes credentials into
+        // the profile's own database, so Ditto reads that instead.
+        Tool::Omp => return omp_auth_status(profile),
     };
 
     let output = base_command(tool, profile)
@@ -121,6 +129,35 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
         Tool::Opencode => parse_opencode_auth_status(output.status.success(), &output.stdout),
         Tool::Omp => unreachable!("OMP auth status returned before command execution"),
     }
+}
+
+/// A profile with no database has never launched OMP, which is the same thing
+/// as holding no credentials. Anything else that goes wrong is reported as
+/// unavailable rather than guessed at: OMP owns this schema, and a future
+/// release is free to change it.
+fn omp_auth_status(profile: &Profile) -> AuthStatus {
+    let database = profile.omp_home.join(OMP_DATABASE);
+    if !database.exists() {
+        return AuthStatus::SignedOut;
+    }
+    match omp_credential_count(&database) {
+        Ok(0) => AuthStatus::SignedOut,
+        Ok(_) => AuthStatus::SignedIn,
+        Err(_) => AuthStatus::Unavailable,
+    }
+}
+
+fn omp_credential_count(database: &Path) -> rusqlite::Result<i64> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // OMP writes with WAL enabled, so this read can land while OMP itself is
+    // running. A short wait rides out that overlap; a long one would stall the
+    // interface, which probes every profile it shows.
+    connection.busy_timeout(Duration::from_millis(250))?;
+    connection.query_row(
+        "SELECT count(*) FROM auth_credentials WHERE disabled_cause IS NULL",
+        [],
+        |row| row.get(0),
+    )
 }
 
 fn parse_claude_auth_status(stdout: &[u8]) -> AuthStatus {

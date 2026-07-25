@@ -197,7 +197,7 @@ jobs:
           else
             gh release create "${RELEASE_TAG}" dist/* \
               --generate-notes \
-              --title "Ditto CLI ${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
               --verify-tag \
               --repo "${GITHUB_REPOSITORY}"
           fi

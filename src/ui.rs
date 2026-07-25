@@ -379,10 +379,22 @@ impl<'a> App<'a> {
                 }
                 KeyCode::Enter => {
                     let original = original.clone();
+                    let signs_out = rename_signs_out(&self.auth, &original);
                     match self.store.rename_profile(&original, input) {
                         Ok(profile) => {
                             self.auth.remove(&original);
                             self.select_after_change(&profile.name)?;
+                            if signs_out {
+                                self.mode = Mode::Notice {
+                                    title: " Claude Code signed out ",
+                                    message: format!(
+                                        "Claude Code ties its credentials to the profile \
+                                         directory, which the rename moved. Press l to sign \
+                                         '{}' back in.",
+                                        profile.name
+                                    ),
+                                };
+                            }
                             Ok(Action::Continue)
                         }
                         Err(rename_error) => {
@@ -692,6 +704,11 @@ impl<'a> App<'a> {
                 ];
                 if let Some(error) = error {
                     lines[2] = Line::styled(error.clone(), Style::new().fg(Color::Red));
+                } else if rename_signs_out(&self.auth, original) {
+                    lines[2] = Line::styled(
+                        "Claude Code will need a fresh sign-in afterwards.",
+                        Style::new().fg(Color::Yellow),
+                    );
                 }
                 render_popup(frame, centered_rect(64, 8, area), " Rename profile ", lines);
             }
@@ -701,7 +718,12 @@ impl<'a> App<'a> {
                     Line::default(),
                     Line::styled("Enter or Esc close", Style::new().fg(Color::DarkGray)),
                 ];
-                render_popup(frame, centered_rect(64, 7, area), title, lines);
+                render_popup(
+                    frame,
+                    centered_rect(64, notice_height(message, area), area),
+                    title,
+                    lines,
+                );
             }
             Mode::ChoosingTool { operation } => {
                 let lines = vec![
@@ -920,6 +942,25 @@ fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'sta
         ),
         area,
     );
+}
+
+/// Whether renaming a profile costs it its Claude Code sign-in. Claude Code
+/// stores credentials against the directory it was pointed at, and a rename
+/// moves that directory, so a signed-in profile does not stay one. A probe
+/// that has not answered yet is nothing to warn about rather than guessed at.
+fn rename_signs_out(auth: &HashMap<String, ProfileAuth>, name: &str) -> bool {
+    auth.get(name)
+        .and_then(|auth| auth.claude)
+        .is_some_and(|status| status == AuthStatus::SignedIn)
+}
+
+/// Grows a notice to fit the message it carries. The popup wraps its text, so
+/// a fixed height would clip anything longer than one line.
+fn notice_height(message: &str, area: Rect) -> u16 {
+    let inner = usize::from(area.width * 64 / 100).saturating_sub(2).max(1);
+    let wrapped = u16::try_from(message.chars().count().div_ceil(inner)).unwrap_or(u16::MAX);
+    // Two borders, a blank line and the closing hint sit around the message.
+    wrapped.saturating_add(4).clamp(7, area.height)
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

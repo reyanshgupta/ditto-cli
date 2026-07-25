@@ -148,7 +148,7 @@ The selected profile is remembered for the next run.
 
 Pressing `d` marks the selected profile with a `★` and makes it the profile every command uses when you leave the name out. Pressing `d` on it again removes the mark. Unlike the remembered selection, the default stays put: running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one.
 
-Renaming keeps the profile's logins, settings, and session history. The built-in `default` profile cannot be renamed.
+Renaming keeps the profile's settings, session history, and its Codex and opencode logins. Claude Code is the exception, and the rename dialog says so before you commit to it: see [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). The built-in `default` profile cannot be renamed.
 
 ## Command-line usage
 
@@ -226,11 +226,23 @@ Everything else is forwarded byte for byte. Colours, hyperlinks, clipboard write
 
 To turn it off, set `DITTO_NO_PROXY=1` and Ditto CLI hands the terminal straight to the tool as it used to. The title stops naming the profile, and the Claude Code status line still works. Ditto CLI also steps aside on its own when output is redirected, or if the pseudoterminal cannot be opened.
 
+## Renaming a profile signs Claude Code out
+
+Claude Code stores credentials against the configuration directory it was pointed at, so moving that directory loses the sign-in. Renaming a profile moves `~/.ditto/profiles/<name>/claude`, and the credentials do not follow it.
+
+Ditto CLI warns before the rename and tells you how to get back in:
+
+```bash
+ditto-cli claude client-a -- auth login
+```
+
+Codex and opencode keep their credentials in files inside the profile, so they survive a rename untouched.
+
 ## Where credentials are stored
 
 Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs. OMP authentication runs through `/login` inside OMP.
 
-Codex keeps its auth state under the selected `CODEX_HOME`. Claude Code uses the selected `CLAUDE_CONFIG_DIR`; on macOS, sensitive Claude credentials remain in the system Keychain. opencode writes `auth.json` into the selected data directory. OMP keeps auth, settings, sessions, and caches under `~/.omp/profiles/<name>/agent`.
+Codex keeps its auth state under the selected `CODEX_HOME`. Claude Code uses the selected `CLAUDE_CONFIG_DIR`; on macOS the credentials themselves stay in the system Keychain, keyed to that directory's path, which is what keeps two profiles from sharing one login — and why [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). opencode writes `auth.json` into the selected data directory. OMP keeps auth, settings, sessions, and caches under `~/.omp/profiles/<name>/agent`.
 
 Ditto CLI's files are laid out like this:
 

@@ -116,9 +116,27 @@ fn create_profile(store: &Store, name: &str) -> Result<()> {
     print_login_instructions(&profile);
     Ok(())
 }
+/// Claude Code stores its credentials against the directory it was pointed at,
+/// and renaming moves that directory, so the sign-in cannot survive. Saying so
+/// before the move beats leaving it to be discovered at the next launch.
 fn rename_profile(store: &Store, current_name: &str, new_name: &str) -> Result<()> {
+    let current = store.load_profile(current_name)?;
+    let signs_out = launch::auth_status(Tool::Claude, &current) == AuthStatus::SignedIn;
+    if signs_out {
+        println!(
+            "Claude Code ties its credentials to the profile directory, which this \
+             rename moves,\nso '{current_name}' will be signed out."
+        );
+        println!();
+    }
+
     let profile = store.rename_profile(current_name, new_name)?;
     println!("Renamed profile '{current_name}' to '{}'.", profile.name);
+    if signs_out {
+        println!();
+        println!("Sign Claude Code back in with:");
+        println!("  ditto-cli claude {} -- auth login", profile.name);
+    }
     Ok(())
 }
 

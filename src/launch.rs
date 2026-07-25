@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
-use crate::profile::Profile;
+use crate::{indicator, profile::Profile};
 
 /// OMP's per-profile store. It holds credentials alongside sessions and
 /// settings, so it lives inside the profile's agent directory.
@@ -281,16 +281,28 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
     command
 }
 
+/// Puts the profile in front of the user before the tool takes the terminal.
+/// Claude Code gets a status line inside its own interface; the rest get the
+/// window title.
+fn show_profile(tool: Tool, profile: &Profile) {
+    if tool == Tool::Claude {
+        indicator::enable_quietly(profile);
+    }
+    indicator::announce(tool, profile);
+}
+
 #[cfg(unix)]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
+    show_profile(tool, profile);
     let error = build_command(tool, profile, args).exec();
     Err(error).with_context(|| format!("could not launch {}", tool.label()))
 }
 
 #[cfg(not(unix))]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
+    show_profile(tool, profile);
     let status = build_command(tool, profile, args)
         .status()
         .with_context(|| format!("could not launch {}", tool.label()))?;

@@ -1,4 +1,5 @@
 mod cli;
+mod indicator;
 mod launch;
 mod profile;
 mod ui;
@@ -7,7 +8,7 @@ mod update;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command, LaunchArgs};
+use cli::{Cli, Command, IndicatorAction, IndicatorArgs, LaunchArgs};
 use launch::{AuthStatus, Tool};
 use profile::{DEFAULT_PROFILE, Profile, Store};
 
@@ -33,6 +34,8 @@ fn run() -> Result<()> {
         Some(Command::Codex(arguments)) => launch_direct(&store, Tool::Codex, arguments),
         Some(Command::Opencode(arguments)) => launch_direct(&store, Tool::Opencode, arguments),
         Some(Command::Omp(arguments)) => launch_direct(&store, Tool::Omp, arguments),
+        Some(Command::Indicator(arguments)) => set_indicator(&store, arguments),
+        Some(Command::Statusline) => indicator::render(),
         Some(Command::Update(arguments)) => update::run(arguments.check, arguments.git),
     }
 }
@@ -114,6 +117,17 @@ fn create_profile(store: &Store, name: &str) -> Result<()> {
 fn rename_profile(store: &Store, current_name: &str, new_name: &str) -> Result<()> {
     let profile = store.rename_profile(current_name, new_name)?;
     println!("Renamed profile '{current_name}' to '{}'.", profile.name);
+    Ok(())
+}
+
+fn set_indicator(store: &Store, arguments: IndicatorArgs) -> Result<()> {
+    let profile = resolve_profile(store, arguments.profile.as_deref())?;
+    let outcome = match arguments.action() {
+        Some(IndicatorAction::On) => indicator::enable(&profile)?,
+        Some(IndicatorAction::Off) => indicator::disable(&profile)?,
+        None => indicator::state(&profile)?,
+    };
+    println!("{}: {}", profile.name, outcome.describe());
     Ok(())
 }
 

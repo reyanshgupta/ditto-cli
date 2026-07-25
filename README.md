@@ -162,6 +162,11 @@ ditto-cli list
 ditto-cli status client-a   # sign-in state for all four tools
 ditto-cli paths client-a
 
+# Which profile am I in?
+ditto-cli indicator client-a         # report the status line setting
+ditto-cli indicator client-a --on    # show the profile inside Claude Code
+ditto-cli indicator client-a --off
+
 # Ditto CLI itself
 ditto-cli update --check
 
@@ -194,6 +199,20 @@ ditto-cli claude client-a -- auth login
 ditto-cli codex client-a -- login
 ditto-cli opencode client-a -- auth login
 ```
+
+## Knowing which profile you are in
+
+Once a tool has taken over the terminal, nothing on screen says which profile it is running as. Ditto CLI answers that in the title for every tool, and inside Claude Code's own interface as well.
+
+Claude Code gets a status line along the bottom of its interface:
+
+```text
+⬖ client-a · you@example.com
+```
+
+Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so: Claude Code renders only one, and replacing yours would quietly take it away. Nothing else in `settings.json` is touched.
+
+The status line reads `DITTO_PROFILE`, so a `claude` you started yourself still reports the right profile as long as `CLAUDE_CONFIG_DIR` points at one.
 
 ## Where credentials are stored
 
@@ -241,7 +260,8 @@ The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.loca
 | `DITTO_CODEX_BIN` | Override the `codex` executable |
 | `DITTO_OPENCODE_BIN` | Override the `opencode` executable |
 | `DITTO_OMP_BIN` | Override the `omp` executable |
-| `DITTO_PROFILE` | Selected profile name exported to every launched tool |
+| `DITTO_PROFILE` | Selected profile name exported to every launched tool, and what Claude Code's status line reports |
+| `NO_COLOR` | Draw the Claude Code status line without colour |
 
 Example:
 

@@ -50,8 +50,42 @@ pub enum Command {
     Opencode(LaunchArgs),
     /// Launch Oh My Pi.
     Omp(LaunchArgs),
+    /// Show or change the profile indicator Claude Code displays.
+    Indicator(IndicatorArgs),
+    /// Print the profile status line. Claude Code runs this itself.
+    #[command(hide = true)]
+    Statusline,
     /// Update Ditto CLI itself.
     Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IndicatorArgs {
+    /// Profile name. Uses the saved profile when omitted.
+    pub profile: Option<String>,
+    /// Show the profile in Claude Code's status line.
+    #[arg(long, conflicts_with = "off")]
+    pub on: bool,
+    /// Take the profile back out of Claude Code's status line.
+    #[arg(long)]
+    pub off: bool,
+}
+
+impl IndicatorArgs {
+    /// Neither flag means the command was asked to report rather than change.
+    pub fn action(&self) -> Option<IndicatorAction> {
+        match (self.on, self.off) {
+            (true, _) => Some(IndicatorAction::On),
+            (_, true) => Some(IndicatorAction::Off),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndicatorAction {
+    On,
+    Off,
 }
 
 #[derive(Debug, Args)]
@@ -156,6 +190,41 @@ mod tests {
                 if profile.as_deref() == Some("work")
                     && args == [OsString::from("--model"), OsString::from("opus")]
         ));
+    }
+
+    fn indicator_args(arguments: &[&str]) -> IndicatorArgs {
+        match Cli::try_parse_from(arguments).unwrap().command {
+            Some(Command::Indicator(arguments)) => arguments,
+            other => panic!("expected an indicator command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_indicator_commands() {
+        // A profile alone reports rather than changing anything, so the status
+        // line can be checked without touching it.
+        let reporting = indicator_args(&["ditto-cli", "indicator", "work"]);
+        assert_eq!(reporting.profile.as_deref(), Some("work"));
+        assert_eq!(reporting.action(), None);
+
+        assert_eq!(indicator_args(&["ditto-cli", "indicator"]).action(), None);
+
+        let turning_on = indicator_args(&["ditto-cli", "indicator", "work", "--on"]);
+        assert_eq!(turning_on.profile.as_deref(), Some("work"));
+        assert_eq!(turning_on.action(), Some(IndicatorAction::On));
+
+        let turning_off = indicator_args(&["ditto-cli", "indicator", "--off"]);
+        assert_eq!(turning_off.profile, None);
+        assert_eq!(turning_off.action(), Some(IndicatorAction::Off));
+
+        // Asking for both at once has no sensible answer.
+        assert!(Cli::try_parse_from(["ditto-cli", "indicator", "--on", "--off"]).is_err());
+    }
+
+    #[test]
+    fn parses_the_status_line_command_claude_code_runs() {
+        let cli = Cli::try_parse_from(["ditto-cli", "statusline"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Statusline)));
     }
 
     #[test]

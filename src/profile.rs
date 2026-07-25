@@ -456,7 +456,7 @@ fn secure_directory(_path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn secure_file(path: &Path) -> Result<()> {
+pub fn secure_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -464,7 +464,7 @@ fn secure_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn secure_file(_path: &Path) -> Result<()> {
+pub fn secure_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 

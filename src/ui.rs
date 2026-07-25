@@ -606,7 +606,7 @@ impl<'a> App<'a> {
             Mode::Browsing => {}
             Mode::Creating { input, error } => {
                 let mut lines = vec![
-                    Line::raw("Use letters, numbers, '-' or '_'."),
+                    Line::raw("Use lowercase letters, numbers, '.', '-' or '_'."),
                     Line::styled(format!("> {input}"), Style::new().fg(DITTO_PURPLE).bold()),
                     Line::default(),
                     Line::styled(

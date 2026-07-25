@@ -196,8 +196,8 @@ impl Store {
         if new_name == DEFAULT_PROFILE {
             bail!("'{DEFAULT_PROFILE}' is reserved for your existing CLI configuration");
         }
-        if current_name.eq_ignore_ascii_case(new_name) {
-            bail!("the new name must differ by more than capitalization");
+        if current_name == new_name {
+            bail!("profile '{new_name}' already has that name");
         }
 
         self.ensure_storage()?;
@@ -355,17 +355,41 @@ impl Store {
     }
 }
 
+/// Accepts only names every supported tool can also accept.
+///
+/// OMP receives the profile name verbatim as `--profile` and `OMP_PROFILE`, and
+/// it requires `^[a-z0-9][a-z0-9._-]{0,63}$` while rejecting trailing dots and
+/// Windows device names. Ditto applies the same rules at creation time so a
+/// profile cannot be created that later fails only when OMP launches.
 pub fn validate_profile_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > MAX_PROFILE_NAME_LEN {
         bail!("profile names must contain 1 to {MAX_PROFILE_NAME_LEN} characters");
     }
-    if !name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        bail!("profile names may only contain letters, numbers, '-' and '_'");
+    if !name.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+    }) {
+        bail!("profile names may only contain lowercase letters, numbers, '.', '-' and '_'");
+    }
+    let first = name.as_bytes()[0];
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        bail!("profile names must start with a lowercase letter or a number");
+    }
+    if name.ends_with('.') {
+        bail!("profile names may not end with '.'");
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    if is_reserved_device_name(stem) {
+        bail!("'{stem}' is a reserved device name on Windows");
     }
     Ok(())
+}
+
+fn is_reserved_device_name(stem: &str) -> bool {
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || stem
+            .strip_prefix("com")
+            .or_else(|| stem.strip_prefix("lpt"))
+            .is_some_and(|port| port.len() == 1 && port.as_bytes()[0].is_ascii_digit())
 }
 
 #[cfg(unix)]
@@ -400,14 +424,40 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_profile_names() {
-        for name in ["", "../work", "work/client", "has space", "."] {
+        for name in ["", "../work", "work/client", "has space", ".", ".."] {
+            assert!(validate_profile_name(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_profile_names_omp_cannot_accept() {
+        for name in [
+            "Work",
+            "DHA",
+            ".hidden",
+            "-leading",
+            "_leading",
+            "trailing.",
+            "con",
+            "nul.txt",
+            "com1",
+            "lpt9",
+        ] {
             assert!(validate_profile_name(name).is_err(), "accepted {name:?}");
         }
     }
 
     #[test]
     fn accepts_portable_profile_names() {
-        for name in ["work", "client-1", "personal_2", "Work"] {
+        for name in [
+            "work",
+            "client-1",
+            "personal_2",
+            "app.v2",
+            "0",
+            "com",
+            "lpt0x",
+        ] {
             assert!(validate_profile_name(name).is_ok(), "rejected {name:?}");
         }
     }

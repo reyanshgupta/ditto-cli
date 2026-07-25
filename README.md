@@ -16,8 +16,10 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Profiles ──────────────┐┌ Selected profile ──────────────────────────────────┐
 │  default  existing     ││work  Isolated profile                              │
-│› work                  ││                                                    │
-│  personal              ││Sign-in status                                      │
+│› work              ★   ││                                                    │
+│  personal              ││★ Used when no profile is named                     │
+│                        ││                                                    │
+│                        ││Sign-in status                                      │
 │                        ││Claude Code  ● Signed in                            │
 │                        ││Codex        ○ Sign in required                     │
 │                        ││opencode     ⠹ Checking                             │
@@ -31,7 +33,8 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │              c Claude Code · x Codex · o opencode · p OMP                    │
-│   ↑↓ select · n new · e rename · l sign in · L sign out · r refresh · q quit │
+│              ↑↓ select · n new · e rename · d default                        │
+│              l sign in · L sign out · r refresh · q quit                     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -135,12 +138,15 @@ Each tool keeps its own credentials. Signing in to one does not copy credentials
 | `L` | Sign out, with confirmation |
 | `n` | Create a profile |
 | `e` | Rename the selected profile |
+| `d` | Make the selected profile the default, or unset it |
 | `r` | Refresh sign-in status |
 | `q`, `Esc`, or `Ctrl+C` | Quit or close a dialog |
 
 Sign-in status is checked in the background, so the list stays responsive while each CLI is asked. A spinner marks the tools still being checked.
 
 The selected profile is remembered for the next run.
+
+Pressing `d` marks the selected profile with a `★` and makes it the profile every command uses when you leave the name out. Pressing `d` on it again removes the mark. Unlike the remembered selection, the default stays put: running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one.
 
 Renaming keeps the profile's logins, settings, and session history. The built-in `default` profile cannot be renamed.
 
@@ -177,7 +183,9 @@ ditto-cli opencode client-a -- --model anthropic/claude-opus-5
 ditto-cli omp client-a -- --model opus
 ```
 
-If the profile name is omitted, Ditto CLI uses the last selected profile. Before the first selection it uses `default`.
+If the profile name is omitted, Ditto CLI uses the profile marked as the default with `d` in the TUI. Without one it falls back to the last selected profile, and before the first selection to `default`. `ditto-cli list` marks the last selection with `*` and the default with a trailing `default`.
+
+Profile names use lowercase letters, numbers, `.`, `-` and `_`, start with a letter or number, and are at most 32 characters. Uppercase names are rejected because OMP accepts only lowercase profile names.
 
 You can also call the native authentication commands through a profile:
 

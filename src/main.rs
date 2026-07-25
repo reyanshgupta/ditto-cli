@@ -41,7 +41,9 @@ fn run_tui(store: &Store) -> Result<()> {
     loop {
         let profiles = store.list_profiles()?;
         let last_profile = store.last_profile()?;
-        let Some(action) = ui::run(store, profiles, last_profile.as_deref())? else {
+        let default_profile = store.default_profile_name()?;
+        let Some(action) = ui::run(store, profiles, last_profile.as_deref(), default_profile)?
+        else {
             return Ok(());
         };
 
@@ -64,6 +66,7 @@ fn run_tui(store: &Store) -> Result<()> {
 
 fn list_profiles(store: &Store) -> Result<()> {
     let last_profile = store.last_profile()?;
+    let default_profile = store.default_profile_name()?;
     for profile in store.list_profiles()? {
         let selected = if last_profile.as_deref() == Some(&profile.name) {
             "*"
@@ -75,7 +78,12 @@ fn list_profiles(store: &Store) -> Result<()> {
         } else {
             "native"
         };
-        println!("{selected} {:<32} {kind}", profile.name);
+        let pinned = if default_profile.as_deref() == Some(&profile.name) {
+            "  default"
+        } else {
+            ""
+        };
+        println!("{selected} {:<32} {kind}{pinned}", profile.name);
     }
     Ok(())
 }
@@ -130,11 +138,13 @@ fn launch_direct(store: &Store, tool: Tool, arguments: LaunchArgs) -> Result<()>
     launch::launch(tool, &profile, &arguments.args)
 }
 
+/// An explicit name always wins. Without one the saved fallback applies, and
+/// with nothing saved this is the user's existing CLI configuration.
 fn resolve_profile(store: &Store, requested_profile: Option<&str>) -> Result<Profile> {
     let name = match requested_profile {
         Some(name) => name.to_owned(),
         None => store
-            .last_profile()?
+            .fallback_profile_name()?
             .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()),
     };
     store.load_profile(&name)

@@ -85,9 +85,16 @@ pub struct Store {
     native_opencode: OpencodeHome,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct State {
+    /// The profile of the most recent launch. Every launch moves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_profile: Option<String>,
+    /// The profile pinned in the interface. It outranks `last_profile` when a
+    /// command omits the profile name, so launching another profile once does
+    /// not quietly move it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_profile: Option<String>,
 }
 
 impl Store {
@@ -217,7 +224,17 @@ impl Store {
             bail!("OMP profile '{new_name}' already exists");
         }
 
-        let was_selected = self.last_profile()?.as_deref() == Some(current_name);
+        // Both the last-used and the pinned profile are stored by name, so a
+        // rename has to carry them across or they would point at nothing.
+        let mut state = self.read_state()?;
+        let mut state_is_stale = false;
+        for slot in [&mut state.last_profile, &mut state.default_profile] {
+            if slot.as_deref() == Some(current_name) {
+                *slot = Some(new_name.to_owned());
+                state_is_stale = true;
+            }
+        }
+
         fs::rename(&source, &destination).with_context(|| {
             format!("could not rename profile '{current_name}' to '{new_name}'")
         })?;
@@ -236,8 +253,8 @@ impl Store {
             }
         }
 
-        if was_selected {
-            if let Err(state_error) = self.save_last_profile(new_name) {
+        if state_is_stale {
+            if let Err(state_error) = self.write_state(&state) {
                 let omp_rollback_error = move_omp_profile
                     .then(|| fs::rename(&omp_destination, &omp_source).err())
                     .flatten();
@@ -245,12 +262,12 @@ impl Store {
 
                 if let Some(rollback_error) = omp_rollback_error.or(ditto_rollback_error) {
                     bail!(
-                        "profile was renamed, but the selected profile could not be updated: \
-                         {state_error:#}; rollback also failed: {rollback_error}"
+                        "profile was renamed, but the saved profile selection could not be \
+                         updated: {state_error:#}; rollback also failed: {rollback_error}"
                     );
                 }
                 return Err(state_error)
-                    .context("could not update the selected profile; rename was reverted");
+                    .context("could not update the saved profile selection; rename was reverted");
             }
         }
 
@@ -271,26 +288,59 @@ impl Store {
     }
 
     pub fn last_profile(&self) -> Result<Option<String>> {
-        let path = self.state_path();
-        if !path.exists() {
-            return Ok(None);
-        }
+        Ok(self.read_state()?.last_profile)
+    }
 
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        let state: State = toml::from_str(&contents)
-            .with_context(|| format!("could not parse {}", path.display()))?;
-        Ok(state.last_profile)
+    /// The profile pinned in the interface, if any. Distinct from
+    /// [`Self::default_profile`], which is the reserved profile that wraps the
+    /// user's existing CLI configuration.
+    pub fn default_profile_name(&self) -> Result<Option<String>> {
+        Ok(self.read_state()?.default_profile)
+    }
+
+    /// The profile a command uses when it does not name one. A pin outranks
+    /// the last launch, so launching another profile once does not move it.
+    /// Both come from one read so a concurrent write cannot be half seen.
+    pub fn fallback_profile_name(&self) -> Result<Option<String>> {
+        let state = self.read_state()?;
+        Ok(state.default_profile.or(state.last_profile))
     }
 
     pub fn save_last_profile(&self, name: &str) -> Result<()> {
         self.load_profile(name)?;
+        let mut state = self.read_state()?;
+        state.last_profile = Some(name.to_owned());
+        self.write_state(&state)
+    }
+
+    /// Pins the profile that commands fall back to when they omit a name, or
+    /// clears the pin when given `None`.
+    pub fn set_default_profile_name(&self, name: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            self.load_profile(name)?;
+        }
+        let mut state = self.read_state()?;
+        state.default_profile = name.map(str::to_owned);
+        self.write_state(&state)
+    }
+
+    fn read_state(&self) -> Result<State> {
+        let path = self.state_path();
+        if !path.exists() {
+            return Ok(State::default());
+        }
+
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        toml::from_str(&contents).with_context(|| format!("could not parse {}", path.display()))
+    }
+
+    /// Rewrites the whole state file, so callers pass a value they read back
+    /// first rather than a fresh one that would drop the other fields.
+    fn write_state(&self, state: &State) -> Result<()> {
         self.ensure_storage()?;
 
-        let state = State {
-            last_profile: Some(name.to_owned()),
-        };
-        let contents = toml::to_string(&state).context("could not serialize profile state")?;
+        let contents = toml::to_string(state).context("could not serialize profile state")?;
         let destination = self.state_path();
         let temporary = self.root.join(format!(".state.toml.{}.tmp", process::id()));
 
@@ -522,6 +572,56 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_pinned_and_last_profile_independent() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+        store.create_profile("work")?;
+        store.create_profile("personal")?;
+
+        assert_eq!(store.default_profile_name()?, None);
+        store.set_default_profile_name(Some("work"))?;
+        store.save_last_profile("personal")?;
+
+        // Writing one field must not drop the other: a launch of another
+        // profile is exactly what the pin is supposed to survive.
+        assert_eq!(store.default_profile_name()?.as_deref(), Some("work"));
+        assert_eq!(store.last_profile()?.as_deref(), Some("personal"));
+        assert_eq!(store.fallback_profile_name()?.as_deref(), Some("work"));
+
+        // Releasing the pin hands the fallback back to the last launch rather
+        // than dropping all the way to the reserved profile.
+        store.set_default_profile_name(None)?;
+        assert_eq!(store.default_profile_name()?, None);
+        assert_eq!(store.last_profile()?.as_deref(), Some("personal"));
+        assert_eq!(store.fallback_profile_name()?.as_deref(), Some("personal"));
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_to_pin_a_profile_that_does_not_exist() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+
+        assert!(store.set_default_profile_name(Some("missing")).is_err());
+        assert_eq!(store.default_profile_name()?, None);
+
+        // The reserved profile is a legitimate pin: it is how a user goes back
+        // to their existing configuration without clearing the setting.
+        store.set_default_profile_name(Some(DEFAULT_PROFILE))?;
+        assert_eq!(
+            store.default_profile_name()?.as_deref(),
+            Some(DEFAULT_PROFILE)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn renames_profile_data_and_selected_state() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let store = Store::new(
@@ -535,6 +635,7 @@ mod tests {
         std::fs::create_dir_all(&original.omp_home)?;
         std::fs::write(original.omp_home.join("marker"), "kept")?;
         store.save_last_profile("work")?;
+        store.set_default_profile_name(Some("work"))?;
 
         let renamed = store.rename_profile("work", "client")?;
 
@@ -553,6 +654,9 @@ mod tests {
         );
         assert!(store.load_profile("work").is_err());
         assert_eq!(store.last_profile()?.as_deref(), Some("client"));
+        // Both are stored by name, so a rename has to carry the pin across or
+        // it would point at a profile that no longer exists.
+        assert_eq!(store.default_profile_name()?.as_deref(), Some("client"));
         Ok(())
     }
 

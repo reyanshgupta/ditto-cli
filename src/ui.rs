@@ -37,7 +37,35 @@ const TICK: Duration = Duration::from_millis(110);
 const MINIMUM_WIDTH: u16 = 60;
 const MINIMUM_HEIGHT: u16 = 20;
 /// The width at which every profile shortcut fits on one footer row.
-const WIDE_FOOTER_WIDTH: u16 = 76;
+const WIDE_FOOTER_WIDTH: u16 = 88;
+/// Marks the profile that commands use when they omit a profile name.
+const DEFAULT_MARK: &str = "★";
+
+/// A footer entry: the key, what it does, and the colour of the key.
+type Shortcut = (&'static str, &'static str, Color);
+
+const SELECT: Shortcut = ("↑↓", "select", DITTO_PURPLE);
+const NEW: Shortcut = ("n", "new", Color::Gray);
+const RENAME: Shortcut = ("e", "rename", Color::Gray);
+const DEFAULT: Shortcut = ("d", "default", Color::Gray);
+const SIGN_IN: Shortcut = ("l", "sign in", Color::Gray);
+const SIGN_OUT: Shortcut = ("L", "sign out", Color::Gray);
+const REFRESH: Shortcut = ("r", "refresh", Color::Gray);
+const QUIT: Shortcut = ("q", "quit", Color::Gray);
+
+const TOOL_SHORTCUTS: [Shortcut; 4] = [
+    ("c", "Claude Code", CLAUDE_ORANGE),
+    ("x", "Codex", CODEX_GREEN),
+    ("o", "opencode", OPENCODE_CYAN),
+    ("p", "OMP", OMP_BLUE),
+];
+const WIDE_SHORTCUT_ROW: [Shortcut; 8] = [
+    SELECT, NEW, RENAME, DEFAULT, SIGN_IN, SIGN_OUT, REFRESH, QUIT,
+];
+const NARROW_SHORTCUT_ROWS: [&[Shortcut]; 2] = [
+    &[SELECT, NEW, RENAME, DEFAULT],
+    &[SIGN_IN, SIGN_OUT, REFRESH, QUIT],
+];
 
 pub enum UiAction {
     Launch {
@@ -64,7 +92,7 @@ enum Mode {
     },
     Notice {
         title: &'static str,
-        message: &'static str,
+        message: String,
     },
     ChoosingTool {
         operation: AuthOperation,
@@ -128,10 +156,16 @@ struct App<'a> {
     receiver: Receiver<Probe>,
     spinner: usize,
     has_auth_environment: bool,
+    default_profile: Option<String>,
 }
 
 impl<'a> App<'a> {
-    fn new(store: &'a Store, profiles: Vec<Profile>, initial_profile: Option<&str>) -> Self {
+    fn new(
+        store: &'a Store,
+        profiles: Vec<Profile>,
+        initial_profile: Option<&str>,
+        default_profile: Option<String>,
+    ) -> Self {
         let selected = initial_profile
             .and_then(|name| profiles.iter().position(|profile| profile.name == name))
             .unwrap_or(0);
@@ -147,6 +181,7 @@ impl<'a> App<'a> {
             receiver,
             spinner: 0,
             has_auth_environment: auth_environment_is_set(),
+            default_profile,
         };
         app.probe_selected();
         app
@@ -273,7 +308,8 @@ impl<'a> App<'a> {
                     } else {
                         self.mode = Mode::Notice {
                             title: " Cannot rename ",
-                            message: "The default profile represents your existing setup and cannot be renamed.",
+                            message: "The default profile represents your existing setup and cannot be renamed."
+                                .to_owned(),
                         };
                     }
                     Action::Continue
@@ -288,6 +324,10 @@ impl<'a> App<'a> {
                     self.mode = Mode::ChoosingTool {
                         operation: AuthOperation::Logout,
                     };
+                    Action::Continue
+                }
+                KeyCode::Char('d') => {
+                    self.toggle_default();
                     Action::Continue
                 }
                 KeyCode::Char('r') => {
@@ -404,10 +444,34 @@ impl<'a> App<'a> {
         }
     }
 
+    fn is_default(&self, name: &str) -> bool {
+        self.default_profile.as_deref() == Some(name)
+    }
+
+    /// Pins the selected profile so commands that omit a name use it, or
+    /// releases it when it is already pinned. The state file is written now
+    /// rather than on exit, so the pin survives a crash or a Ctrl-C.
+    fn toggle_default(&mut self) {
+        let name = self.selected_profile().name.clone();
+        let pinned = (!self.is_default(&name)).then_some(name);
+
+        match self.store.set_default_profile_name(pinned.as_deref()) {
+            Ok(()) => self.default_profile = pinned,
+            Err(error) => {
+                self.mode = Mode::Notice {
+                    title: " Cannot set default ",
+                    message: format!("{error:#}"),
+                };
+            }
+        }
+    }
+
     /// Reloads the list after a create or rename and puts the cursor on the
     /// profile the change produced.
     fn select_after_change(&mut self, name: &str) -> Result<()> {
         self.profiles = self.store.list_profiles()?;
+        // A rename rewrites the pin, so it is re-read rather than assumed.
+        self.default_profile = self.store.default_profile_name()?;
         self.selected = self
             .profiles
             .iter()
@@ -476,9 +540,15 @@ impl<'a> App<'a> {
         let columns = Layout::horizontal([Constraint::Length(26), Constraint::Min(30)]).split(area);
         let items = self.profiles.iter().map(|profile| {
             let suffix = if profile.managed { "" } else { "  existing" };
+            let mark = if self.is_default(&profile.name) {
+                format!("  {DEFAULT_MARK}")
+            } else {
+                String::new()
+            };
             ListItem::new(Line::from(vec![
                 Span::raw(&profile.name),
                 Span::styled(suffix, Style::new().fg(Color::DarkGray)),
+                Span::styled(mark, Style::new().fg(Color::Yellow)),
             ]))
         });
         let profile_list = List::new(items)
@@ -565,27 +635,11 @@ impl<'a> App<'a> {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect, narrow: bool) {
-        const SELECT: (&str, &str, Color) = ("↑↓", "select", DITTO_PURPLE);
-        const NEW: (&str, &str, Color) = ("n", "new", Color::Gray);
-        const RENAME: (&str, &str, Color) = ("e", "rename", Color::Gray);
-        const SIGN_IN: (&str, &str, Color) = ("l", "sign in", Color::Gray);
-        const SIGN_OUT: (&str, &str, Color) = ("L", "sign out", Color::Gray);
-        const REFRESH: (&str, &str, Color) = ("r", "refresh", Color::Gray);
-        const QUIT: (&str, &str, Color) = ("q", "quit", Color::Gray);
-
-        let mut lines = vec![shortcut_line(&[
-            ("c", "Claude Code", CLAUDE_ORANGE),
-            ("x", "Codex", CODEX_GREEN),
-            ("o", "opencode", OPENCODE_CYAN),
-            ("p", "OMP", OMP_BLUE),
-        ])];
+        let mut lines = vec![shortcut_line(&TOOL_SHORTCUTS)];
         if narrow {
-            lines.push(shortcut_line(&[SELECT, NEW, RENAME, REFRESH]));
-            lines.push(shortcut_line(&[SIGN_IN, SIGN_OUT, QUIT]));
+            lines.extend(NARROW_SHORTCUT_ROWS.iter().map(|row| shortcut_line(row)));
         } else {
-            lines.push(shortcut_line(&[
-                SELECT, NEW, RENAME, SIGN_IN, SIGN_OUT, REFRESH, QUIT,
-            ]));
+            lines.push(shortcut_line(&WIDE_SHORTCUT_ROW));
         }
         if self.has_auth_environment {
             lines.push(Line::styled(
@@ -640,7 +694,7 @@ impl<'a> App<'a> {
             }
             Mode::Notice { title, message } => {
                 let lines = vec![
-                    Line::raw(*message),
+                    Line::raw(message.clone()),
                     Line::default(),
                     Line::styled("Enter or Esc close", Style::new().fg(Color::DarkGray)),
                 ];
@@ -707,8 +761,9 @@ pub fn run(
     store: &Store,
     profiles: Vec<Profile>,
     initial_profile: Option<&str>,
+    default_profile: Option<String>,
 ) -> Result<Option<UiAction>> {
-    let app = App::new(store, profiles, initial_profile);
+    let app = App::new(store, profiles, initial_profile, default_profile);
     let mut terminal = ratatui::init();
     let guard = TerminalGuard;
     let result = run_loop(&mut terminal, app);
@@ -882,6 +937,28 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// The footer centres each row inside a border, so a row wider than its
+    /// box is silently clipped rather than wrapped. This pins the width that
+    /// decides between one row and two to what the rows actually measure.
+    #[test]
+    fn footer_rows_fit_the_widths_that_select_them() {
+        let wide = shortcut_line(&WIDE_SHORTCUT_ROW).width() as u16 + 2;
+        assert!(wide <= WIDE_FOOTER_WIDTH, "{wide} exceeds the wide footer");
+        assert!(
+            wide > WIDE_FOOTER_WIDTH - 1,
+            "the wide footer is {} wider than it needs to be, so terminals \
+             that could show one row are given two",
+            WIDE_FOOTER_WIDTH - wide
+        );
+
+        for row in NARROW_SHORTCUT_ROWS {
+            let width = shortcut_line(row).width() as u16 + 2;
+            assert!(width <= MINIMUM_WIDTH, "{width} exceeds the narrow footer");
+        }
+        let tools = shortcut_line(&TOOL_SHORTCUTS).width() as u16 + 2;
+        assert!(tools <= MINIMUM_WIDTH, "{tools} exceeds the narrow footer");
+    }
 
     #[test]
     fn abbreviates_paths_inside_the_home_directory() {

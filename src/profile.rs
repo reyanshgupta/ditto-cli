@@ -95,6 +95,11 @@ struct State {
     /// not quietly move it.
     #[serde(skip_serializing_if = "Option::is_none")]
     default_profile: Option<String>,
+    /// Whether launching from an unbound directory records the profile it used
+    /// there. Absent means on, so the behaviour does not wait for a setting to
+    /// be written before it starts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_auto_bind: Option<bool>,
 }
 
 impl Store {
@@ -125,6 +130,12 @@ impl Store {
 
     pub fn user_home(&self) -> &Path {
         &self.user_home
+    }
+
+    /// Ditto's own directory, which the workspace registry lives in beside the
+    /// state file and the profiles.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn list_profiles(&self) -> Result<Vec<Profile>> {
@@ -324,6 +335,19 @@ impl Store {
         self.write_state(&state)
     }
 
+    /// Whether a launch records the profile it used in the directory it ran
+    /// from. On unless it has been turned off, since a binding that has to be
+    /// asked for is one most directories would never get.
+    pub fn workspace_auto_bind(&self) -> Result<bool> {
+        Ok(self.read_state()?.workspace_auto_bind.unwrap_or(true))
+    }
+
+    pub fn set_workspace_auto_bind(&self, enabled: bool) -> Result<()> {
+        let mut state = self.read_state()?;
+        state.workspace_auto_bind = Some(enabled);
+        self.write_state(&state)
+    }
+
     fn read_state(&self) -> Result<State> {
         let path = self.state_path();
         if !path.exists() {
@@ -341,18 +365,7 @@ impl Store {
         self.ensure_storage()?;
 
         let contents = toml::to_string(state).context("could not serialize profile state")?;
-        let destination = self.state_path();
-        let temporary = self.root.join(format!(".state.toml.{}.tmp", process::id()));
-
-        fs::write(&temporary, contents)
-            .with_context(|| format!("could not write {}", temporary.display()))?;
-        secure_file(&temporary)?;
-        if let Err(error) = fs::rename(&temporary, &destination) {
-            let _ = fs::remove_file(&temporary);
-            return Err(error)
-                .with_context(|| format!("could not replace {}", destination.display()));
-        }
-        Ok(())
+        write_private_file(&self.state_path(), &contents)
     }
 
     fn ensure_storage(&self) -> Result<()> {
@@ -440,6 +453,34 @@ fn is_reserved_device_name(stem: &str) -> bool {
             .strip_prefix("com")
             .or_else(|| stem.strip_prefix("lpt"))
             .is_some_and(|port| port.len() == 1 && port.as_bytes()[0].is_ascii_digit())
+}
+
+/// Writes a file whole and leaves it readable only by its owner.
+///
+/// Replacing the file in one step is what keeps a crash from leaving half a
+/// file behind for a tool to refuse to start from, and the temporary carries
+/// the process id so two copies of Ditto cannot land on each other.
+pub fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
+
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} does not name a file", path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let temporary = parent.join(format!(".{name}.{}.tmp", process::id()));
+
+    fs::write(&temporary, contents)
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    secure_file(&temporary)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("could not replace {}", path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

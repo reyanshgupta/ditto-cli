@@ -1,6 +1,6 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -34,6 +34,8 @@ pub enum Command {
         /// New profile name.
         new_name: String,
     },
+    /// Show or change the profile a directory launches with.
+    Workspace(WorkspaceArgs),
     /// Show the Claude, Codex, opencode, and OMP directories for a profile.
     Paths {
         /// Profile name. Uses the last selected profile when omitted.
@@ -57,6 +59,53 @@ pub enum Command {
     Statusline,
     /// Update Ditto CLI itself.
     Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: Option<WorkspaceCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Bind a directory to a profile.
+    Use {
+        /// Profile the directory should launch with.
+        profile: String,
+        /// Record the binding in Ditto's own registry rather than writing a
+        /// file, for directories that are not yours to add a file to.
+        #[arg(long)]
+        global: bool,
+        /// Directory to bind. Uses the current directory when omitted.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Remove the binding on a directory, leaving its ancestors alone.
+    Clear {
+        /// Directory to unbind. Uses the current directory when omitted.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// List the directories recorded in Ditto's own registry.
+    List,
+    /// Show or change whether launching binds an unbound directory.
+    Auto {
+        /// Reports the current setting when omitted.
+        state: Option<AutoState>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AutoState {
+    On,
+    Off,
+}
+
+impl AutoState {
+    pub fn enabled(self) -> bool {
+        matches!(self, Self::On)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +268,65 @@ mod tests {
 
         // Asking for both at once has no sensible answer.
         assert!(Cli::try_parse_from(["ditto-cli", "indicator", "--on", "--off"]).is_err());
+    }
+
+    fn workspace_command(arguments: &[&str]) -> Option<WorkspaceCommand> {
+        match Cli::try_parse_from(arguments).unwrap().command {
+            Some(Command::Workspace(arguments)) => arguments.command,
+            other => panic!("expected a workspace command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_workspace_commands() {
+        // A bare `workspace` reports the binding rather than changing it.
+        assert!(workspace_command(&["ditto-cli", "workspace"]).is_none());
+
+        assert!(matches!(
+            workspace_command(&["ditto-cli", "workspace", "use", "work"]),
+            Some(WorkspaceCommand::Use { profile, global, path })
+                if profile == "work" && !global && path.is_none()
+        ));
+
+        assert!(matches!(
+            workspace_command(&["ditto-cli", "workspace", "use", "work", "--global"]),
+            Some(WorkspaceCommand::Use { global, .. }) if global
+        ));
+
+        assert!(matches!(
+            workspace_command(&["ditto-cli", "workspace", "clear", "--path", "/tmp/project"]),
+            Some(WorkspaceCommand::Clear { path })
+                if path.as_deref() == Some(std::path::Path::new("/tmp/project"))
+        ));
+
+        assert!(matches!(
+            workspace_command(&["ditto-cli", "workspace", "list"]),
+            Some(WorkspaceCommand::List)
+        ));
+
+        // Binding has no fallback profile to reach for, so the name is required.
+        assert!(Cli::try_parse_from(["ditto-cli", "workspace", "use"]).is_err());
+    }
+
+    #[test]
+    fn parses_the_auto_bind_setting() {
+        // No state reports rather than changing, matching how `indicator` and
+        // the rest of the reporting commands read their own arguments.
+        assert!(matches!(
+            workspace_command(&["ditto-cli", "workspace", "auto"]),
+            Some(WorkspaceCommand::Auto { state: None })
+        ));
+
+        for (argument, expected) in [("on", AutoState::On), ("off", AutoState::Off)] {
+            assert!(matches!(
+                workspace_command(&["ditto-cli", "workspace", "auto", argument]),
+                Some(WorkspaceCommand::Auto { state: Some(state) }) if state == expected
+            ));
+        }
+
+        assert!(AutoState::On.enabled());
+        assert!(!AutoState::Off.enabled());
+        assert!(Cli::try_parse_from(["ditto-cli", "workspace", "auto", "maybe"]).is_err());
     }
 
     #[test]

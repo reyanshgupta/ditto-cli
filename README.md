@@ -162,6 +162,13 @@ ditto-cli list
 ditto-cli status client-a   # sign-in state for all four tools
 ditto-cli paths client-a
 
+# Bind a directory to a profile
+ditto-cli workspace                  # what this directory launches with
+ditto-cli workspace use client-a
+ditto-cli workspace clear
+ditto-cli workspace list
+ditto-cli workspace auto off
+
 # Which profile am I in?
 ditto-cli indicator client-a         # report the status line setting
 ditto-cli indicator client-a --on    # show the profile inside Claude Code
@@ -188,7 +195,7 @@ ditto-cli opencode client-a -- --model anthropic/claude-opus-5
 ditto-cli omp client-a -- --model opus
 ```
 
-If the profile name is omitted, Ditto CLI uses the profile marked as the default with `d` in the TUI. Without one it falls back to the last selected profile, and before the first selection to `default`. `ditto-cli list` marks the last selection with `*` and the default with a trailing `default`.
+If the profile name is omitted, Ditto CLI asks the directory first (see [Workspaces](#workspaces)). Failing that it uses the profile marked as the default with `d` in the TUI, then the last selected profile, and before the first selection `default`. `ditto-cli list` marks the last selection with `*` and the default with a trailing `default`.
 
 Profile names use lowercase letters, numbers, `.`, `-` and `_`, start with a letter or number, and are at most 32 characters. Uppercase names are rejected because OMP accepts only lowercase profile names.
 
@@ -199,6 +206,73 @@ ditto-cli claude client-a -- auth login
 ditto-cli codex client-a -- login
 ditto-cli opencode client-a -- auth login
 ```
+
+## Workspaces
+
+A project usually belongs to one profile for its whole life. A workspace records that once, so every launch from the project uses the right profile without being told:
+
+```bash
+cd ~/code/client-a
+ditto-cli workspace use client-a
+ditto-cli claude              # runs as client-a, from here and every subdirectory
+```
+
+`ditto-cli workspace use` writes a `.ditto.toml` at the project root:
+
+```toml
+# Written by ditto-cli. Names the profile this directory launches with.
+profile = "client-a"
+```
+
+It is a normal file: readable, editable by hand, and safe to commit if everyone on the project uses the same profile. Add it to `.gitignore` if they do not.
+
+### Directories are bound automatically
+
+Launching from a directory that nothing yet answers for binds it to the profile that launch used:
+
+```console
+$ cd ~/code/new-project
+$ ditto-cli cc client-a
+Bound this directory to 'client-a' (~/code/new-project/.ditto.toml).
+```
+
+The next `ditto-cli cc` from that project needs no name. Two directories are never bound this way: your home directory and the filesystem root, since a file at either would capture every project underneath it. Turn the behaviour off with `ditto-cli workspace auto off`.
+
+### How a directory is resolved
+
+Ditto walks from the current directory towards the filesystem root and stops at the first binding it finds, so the nearest one wins and a subdirectory can overrule the repository it sits in. A directory already answered for by an ancestor is left alone, which is what stops every subdirectory of a bound project from collecting a file of its own.
+
+Naming a profile explicitly always wins, for that run only:
+
+```console
+$ cd ~/code/client-a          # bound to client-a
+$ ditto-cli cc work
+ditto-cli: using 'work' for this run; ~/code/client-a/.ditto.toml still names 'client-a'
+```
+
+The binding is untouched. Use `ditto-cli workspace use work` to change it for good.
+
+### Directories you cannot leave a file in
+
+For a repository that is not yours to add a file to, record the binding in Ditto's own registry instead:
+
+```bash
+ditto-cli workspace use client-a --global
+```
+
+That writes `~/.ditto/workspaces.json` rather than a file in the project. `ditto-cli workspace list` prints everything recorded there. Files cannot be listed, because they are found by walking up from wherever Ditto runs — `ditto-cli workspace` reports the one in effect where you are.
+
+Where a directory has both, the file wins, so a project can carry a binding that overrides whatever this machine recorded for it. Between two directories, distance decides first: a nearer registry entry beats a further file.
+
+### Clearing a binding
+
+```console
+$ ditto-cli workspace clear
+Removed ~/code/client-a/crates/core/.ditto.toml.
+~/code/client-a/crates/core now inherits 'client-a' from ~/code/client-a/.ditto.toml.
+```
+
+Clearing touches only the directory you name, never its ancestors, and reports what the directory falls back to.
 
 ## Knowing which profile you are in
 
@@ -249,6 +323,7 @@ Ditto CLI's files are laid out like this:
 ```text
 ~/.ditto/
 ├── state.toml
+├── workspaces.json      # directories bound without a file of their own
 └── profiles/
     ├── work/
     │   ├── claude/

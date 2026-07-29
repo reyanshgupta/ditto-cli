@@ -22,11 +22,32 @@ use profile::{DEFAULT_PROFILE, Profile, Store};
 use workspace::{WORKSPACE_FILE, Workspaces};
 
 fn main() {
+    restore_sigpipe();
     if let Err(error) = run() {
         eprintln!("ditto-cli: {error:#}");
         std::process::exit(1);
     }
 }
+
+/// Ends quietly when the reader of Ditto's output goes away.
+///
+/// Rust ignores `SIGPIPE` so that a write to a closed pipe returns an error
+/// instead of killing the process, but the print macros then panic on that
+/// error. Every reporting command here prints lines someone may well pipe into
+/// `head`, and a panic and a backtrace is not the answer that deserves, so the
+/// default disposition is restored and Ditto ends the way every other tool in
+/// the pipeline does.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: called before any thread is started, and `SIG_DFL` is the
+    // disposition the process began life with before Rust's runtime changed it.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
 
 fn run() -> Result<()> {
     let cli = Cli::parse();

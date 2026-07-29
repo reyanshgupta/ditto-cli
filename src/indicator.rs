@@ -65,10 +65,15 @@ impl Indicator {
 /// own. Someone who configured a status line meant it, and Claude Code renders
 /// only one, so replacing it would silently take a feature away.
 pub fn enable(profile: &Profile) -> Result<Indicator> {
-    let entry = ditto_status_line()?;
+    install(profile, &ditto_status_line()?)
+}
+
+/// Takes the entry rather than building it, so a test can install a status line
+/// naming a known path instead of whichever binary happens to be running.
+fn install(profile: &Profile, entry: &Value) -> Result<Indicator> {
     update(profile, |settings| match settings.get("statusLine") {
         Some(existing) if !is_ditto(existing) => (Indicator::Foreign, false),
-        Some(existing) if *existing == entry => (Indicator::AlreadyOn, false),
+        Some(existing) if existing == entry => (Indicator::AlreadyOn, false),
         _ => {
             settings.insert("statusLine".to_owned(), entry.clone());
             (Indicator::Installed, true)
@@ -167,11 +172,12 @@ fn write(path: &Path, settings: &Map<String, Value>) -> Result<()> {
 
 fn ditto_status_line() -> Result<Value> {
     let executable = env::current_exe().context("could not locate the Ditto CLI binary")?;
-    let command = format!(
-        "{} {SUBCOMMAND}",
-        shell_quote(&executable.to_string_lossy())
-    );
-    Ok(serde_json::json!({ "type": "command", "command": command }))
+    Ok(status_line_entry(&executable.to_string_lossy()))
+}
+
+fn status_line_entry(executable: &str) -> Value {
+    let command = format!("{} {SUBCOMMAND}", shell_quote(executable));
+    serde_json::json!({ "type": "command", "command": command })
 }
 
 /// Claude Code runs the command through a shell, so a home directory with a
@@ -306,6 +312,15 @@ mod tests {
         read(&settings_path(profile)).unwrap()
     }
 
+    /// A status line naming an installed Ditto, so these tests do not depend on
+    /// where the test binary itself was built. Under `cargo test` the running
+    /// executable is `deps/ditto_cli-<hash>`, which `is_ditto` does not
+    /// recognise; asserting against it only ever passed because the build path
+    /// happened to sit under a directory called `ditto-cli`.
+    fn installed_entry() -> Value {
+        status_line_entry("/usr/local/bin/ditto-cli")
+    }
+
     #[test]
     fn installs_once_and_leaves_the_rest_of_the_settings_alone() -> Result<()> {
         let temporary = tempfile::tempdir()?;
@@ -316,11 +331,12 @@ mod tests {
             r#"{"theme":"dark","model":"opus"}"#,
         )?;
 
-        assert_eq!(enable(&profile)?, Indicator::Installed);
+        let entry = installed_entry();
+        assert_eq!(install(&profile, &entry)?, Indicator::Installed);
         assert_eq!(state(&profile)?, Indicator::AlreadyOn);
         // A second call must not rewrite a file that already says the right
         // thing, or every launch would churn the user's settings.
-        assert_eq!(enable(&profile)?, Indicator::AlreadyOn);
+        assert_eq!(install(&profile, &entry)?, Indicator::AlreadyOn);
 
         let installed = settings(&profile);
         assert_eq!(installed["theme"], "dark");
@@ -342,7 +358,7 @@ mod tests {
         let theirs = r#"{"statusLine":{"type":"command","command":"bash ~/mine.sh"}}"#;
         fs::write(settings_path(&profile), theirs)?;
 
-        assert_eq!(enable(&profile)?, Indicator::Foreign);
+        assert_eq!(install(&profile, &installed_entry())?, Indicator::Foreign);
         assert_eq!(state(&profile)?, Indicator::Foreign);
         assert_eq!(disable(&profile)?, Indicator::Foreign);
         assert_eq!(
@@ -358,7 +374,7 @@ mod tests {
         let profile = profile(temporary.path());
 
         assert_eq!(state(&profile)?, Indicator::Off);
-        assert_eq!(enable(&profile)?, Indicator::Installed);
+        assert_eq!(install(&profile, &installed_entry())?, Indicator::Installed);
         assert!(is_ditto(&settings(&profile)["statusLine"]));
         Ok(())
     }
@@ -371,7 +387,7 @@ mod tests {
         fs::write(settings_path(&profile), "{ not json")?;
 
         // Overwriting here would throw away whatever the user meant to write.
-        assert!(enable(&profile).is_err());
+        assert!(install(&profile, &installed_entry()).is_err());
         assert_eq!(fs::read_to_string(settings_path(&profile))?, "{ not json");
         Ok(())
     }
@@ -393,8 +409,11 @@ mod tests {
 
     #[test]
     fn recognises_only_the_command_it_writes() {
-        let ours = ditto_status_line().unwrap();
-        assert!(is_ditto(&ours));
+        assert!(is_ditto(&installed_entry()));
+        // Recognition is by binary name, so a Ditto installed under a different
+        // one is not recognised. That only ever hides a status line Ditto wrote
+        // from a later `--off`, never overwrites one the user configured.
+        assert!(!is_ditto(&status_line_entry("/usr/local/bin/ditto")));
         assert!(!is_ditto(&serde_json::json!({
             "type": "command",
             "command": "bash ~/statusline.sh",

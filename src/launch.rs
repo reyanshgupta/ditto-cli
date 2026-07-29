@@ -1,15 +1,16 @@
 use std::{
     ffi::OsString,
+    io,
     path::Path,
     process::{Command, Stdio},
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
-use crate::{indicator, profile::Profile};
+use crate::{indicator, profile::Profile, program};
 
 /// OMP's per-profile store. It holds credentials alongside sessions and
 /// settings, so it lives inside the profile's agent directory.
@@ -33,6 +34,21 @@ impl Tool {
             Self::Codex => "Codex",
             Self::Opencode => "opencode",
             Self::Omp => "OMP",
+        }
+    }
+
+    /// The name this tool answers to in JSON output and on the command line.
+    ///
+    /// Kept apart from [`Self::label`], which is written for a person and is
+    /// free to change with the interface. Anything parsing Ditto's output
+    /// depends on these, so they are the subcommand names and change only with
+    /// a deliberate break.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+            Self::Omp => "omp",
         }
     }
 
@@ -87,6 +103,17 @@ pub enum AuthStatus {
     SignedIn,
     SignedOut,
     Unavailable,
+}
+
+impl AuthStatus {
+    /// The stable name for this state in JSON output. See [`Tool::key`].
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::SignedIn => "signed_in",
+            Self::SignedOut => "signed_out",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -237,10 +264,13 @@ pub fn authenticate(operation: AuthOperation, tool: Tool, profile: &Profile) -> 
     let Some(args) = operation.args(tool) else {
         bail!("OMP authentication is managed inside OMP with `/login` and `/logout`");
     };
-    let status = base_command(tool, profile)
-        .args(args)
-        .status()
-        .with_context(|| format!("could not run {} authentication", tool.label()))?;
+
+    // Signing in is a conversation with the tool, browser round trip and all,
+    // so Ctrl-C belongs to it for as long as it lasts.
+    let interrupts = Interrupts::leave_to_tool();
+    let started = base_command(tool, profile).args(args).status();
+    drop(interrupts);
+    let status = started.map_err(|error| cannot_launch(tool, error))?;
 
     if !status.success() {
         bail!(
@@ -253,7 +283,7 @@ pub fn authenticate(operation: AuthOperation, tool: Tool, profile: &Profile) -> 
 }
 
 fn base_command(tool: Tool, profile: &Profile) -> Command {
-    let mut command = Command::new(tool.executable());
+    let mut command = Command::new(program::resolve(&tool.executable()));
     command.env("DITTO_PROFILE", &profile.name);
     match tool {
         Tool::Claude => {
@@ -284,6 +314,7 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
 /// Set to step out of the way and hand the terminal straight to the tool. The
 /// title stops naming the profile, which is the price of a way out if running
 /// underneath Ditto ever causes trouble.
+#[cfg(unix)]
 const NO_PROXY_VARIABLE: &str = "DITTO_NO_PROXY";
 
 /// Puts the profile in front of the user before the tool takes the terminal.
@@ -309,6 +340,78 @@ fn proxy_wanted() -> bool {
         && std::io::stdout().is_terminal()
 }
 
+/// Says plainly when a tool is not installed. The operating system reports that
+/// as a missing file, which reads as a fault in Ditto rather than as a CLI the
+/// user has yet to install.
+fn cannot_launch(tool: Tool, error: io::Error) -> anyhow::Error {
+    if error.kind() == io::ErrorKind::NotFound {
+        return anyhow!(
+            "{} is not installed, or its command is not on PATH",
+            tool.label()
+        );
+    }
+    anyhow::Error::new(error).context(format!("could not launch {}", tool.label()))
+}
+
+/// Hands Ctrl-C to the tool for as long as one is running.
+///
+/// Unix has nothing to do here: `exec` leaves no Ditto behind, and a proxied
+/// tool is given a session of its own, so the key never reaches Ditto either
+/// way. Windows delivers it to every process sharing the console at once, and
+/// Ditto's own default is to exit, which would hand the shell prompt back while
+/// the tool carried on drawing over it. Reporting the event as handled leaves
+/// the tool to decide what Ctrl-C means, which for every tool Ditto launches is
+/// something other than dying.
+struct Interrupts;
+
+impl Interrupts {
+    #[cfg(windows)]
+    fn leave_to_tool() -> Self {
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(ignore_interrupt),
+                windows_sys::Win32::Foundation::TRUE,
+            );
+        }
+        Self
+    }
+
+    #[cfg(not(windows))]
+    fn leave_to_tool() -> Self {
+        Self
+    }
+}
+
+impl Drop for Interrupts {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(ignore_interrupt),
+                windows_sys::Win32::Foundation::FALSE,
+            );
+        }
+    }
+}
+
+/// Answering that an event was handled is what keeps the default handler, which
+/// would end Ditto, from running after this one. Only the two the user presses
+/// are answered for: closing the window, logging off and shutting down are all
+/// meant to end Ditto, and holding them would only delay it.
+#[cfg(windows)]
+unsafe extern "system" fn ignore_interrupt(event: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::{
+        Foundation::{FALSE, TRUE},
+        System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT},
+    };
+
+    if matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        TRUE
+    } else {
+        FALSE
+    }
+}
+
 #[cfg(unix)]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -332,21 +435,22 @@ pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
 
     indicator::announce(tool, profile);
     let error = build_command(tool, profile, args).exec();
-    Err(error).with_context(|| format!("could not launch {}", tool.label()))
+    Err(cannot_launch(tool, error))
 }
 
+/// Windows has no `exec`, so Ditto waits on the tool instead of being replaced
+/// by it and then exits the way the tool did. A caller that reads the exit code
+/// sees what it would have seen had it run the tool itself.
 #[cfg(not(unix))]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
     show_profile(tool, profile);
-    let status = build_command(tool, profile, args)
-        .status()
-        .with_context(|| format!("could not launch {}", tool.label()))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("{} exited with {status}", tool.label())
-    }
+    let interrupts = Interrupts::leave_to_tool();
+    let started = build_command(tool, profile, args).status();
+    drop(interrupts);
+
+    let status = started.map_err(|error| cannot_launch(tool, error))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 #[cfg(test)]

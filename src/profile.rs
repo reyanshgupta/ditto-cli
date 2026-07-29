@@ -274,6 +274,60 @@ impl Store {
         Ok(self.managed_profile(new_name))
     }
 
+    /// Removes an isolated profile, its OMP counterpart, and any state that
+    /// named it.
+    ///
+    /// The state is cleared before the directories go, because the two failures
+    /// are not equally bad. A pin left pointing at a profile that no longer
+    /// exists makes every command that omits a name fail, while a pin released
+    /// from a profile that survived a failed removal costs one keystroke to set
+    /// again.
+    pub fn delete_profile(&self, name: &str) -> Result<()> {
+        validate_profile_name(name)?;
+        if name == DEFAULT_PROFILE {
+            bail!("'{DEFAULT_PROFILE}' is your existing CLI configuration and cannot be deleted");
+        }
+
+        self.ensure_storage()?;
+        let root = self.profile_root(name);
+        if !root.is_dir() {
+            bail!("profile '{name}' does not exist");
+        }
+
+        let mut state = self.read_state()?;
+        let mut state_is_stale = false;
+        for slot in [&mut state.last_profile, &mut state.default_profile] {
+            if slot.as_deref() == Some(name) {
+                *slot = None;
+                state_is_stale = true;
+            }
+        }
+        if state_is_stale {
+            self.write_state(&state)?;
+        }
+
+        fs::remove_dir_all(&root)
+            .with_context(|| format!("could not delete {}", root.display()))?;
+
+        let omp_root = self.omp_profile_root(name);
+        if omp_root.exists() {
+            fs::remove_dir_all(&omp_root)
+                .with_context(|| format!("could not delete {}", omp_root.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Every directory `delete_profile` would remove, for a command that has to
+    /// say what it is about to destroy before it is allowed to.
+    pub fn deletion_targets(&self, name: &str) -> Vec<PathBuf> {
+        let omp_root = self.omp_profile_root(name);
+        let mut targets = vec![self.profile_root(name)];
+        if omp_root.exists() {
+            targets.push(omp_root);
+        }
+        targets
+    }
+
     pub fn load_profile(&self, name: &str) -> Result<Profile> {
         validate_profile_name(name)?;
         if name == DEFAULT_PROFILE {
@@ -341,18 +395,7 @@ impl Store {
         self.ensure_storage()?;
 
         let contents = toml::to_string(state).context("could not serialize profile state")?;
-        let destination = self.state_path();
-        let temporary = self.root.join(format!(".state.toml.{}.tmp", process::id()));
-
-        fs::write(&temporary, contents)
-            .with_context(|| format!("could not write {}", temporary.display()))?;
-        secure_file(&temporary)?;
-        if let Err(error) = fs::rename(&temporary, &destination) {
-            let _ = fs::remove_file(&temporary);
-            return Err(error)
-                .with_context(|| format!("could not replace {}", destination.display()));
-        }
-        Ok(())
+        write_private_file(&self.state_path(), &contents)
     }
 
     fn ensure_storage(&self) -> Result<()> {
@@ -442,6 +485,59 @@ fn is_reserved_device_name(stem: &str) -> bool {
             .is_some_and(|port| port.len() == 1 && port.as_bytes()[0].is_ascii_digit())
 }
 
+/// Writes a file whole and leaves it readable only by its owner.
+///
+/// Replacing the file in one step is what keeps a crash from leaving half of a
+/// settings file behind for a tool to refuse to start from, and the temporary
+/// carries the process id so two copies of Ditto cannot land on each other.
+pub fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
+
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} does not name a file", path.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let temporary = parent.join(format!(".{name}.{}.tmp", process::id()));
+
+    fs::write(&temporary, contents)
+        .with_context(|| format!("could not write {}", temporary.display()))?;
+    secure_file(&temporary)?;
+    if let Err(error) = replace(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("could not replace {}", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+/// Windows refuses to replace a file that another program has open, and a virus
+/// scanner reading a file Ditto has only just written counts as one. Waiting it
+/// out beats reporting a failure the user can neither see nor act on; the waits
+/// stay short because the alternative to succeeding is trying again, not
+/// hanging.
+#[cfg(windows)]
+fn replace(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 5;
+
+    for attempt in 1..ATTEMPTS {
+        match fs::rename(temporary, destination) {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
+            }
+        }
+    }
+    fs::rename(temporary, destination)
+}
+
 #[cfg(unix)]
 fn secure_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -450,13 +546,16 @@ fn secure_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("could not secure {}", path.display()))
 }
 
+/// Windows has no mode to set. A profile lives under the user's own directory,
+/// which the system already restricts to that user, so the inherited access
+/// control is what stands in for the mode set above.
 #[cfg(not(unix))]
 fn secure_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 #[cfg(unix)]
-pub fn secure_file(path: &Path) -> Result<()> {
+fn secure_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -464,7 +563,7 @@ pub fn secure_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub fn secure_file(_path: &Path) -> Result<()> {
+fn secure_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -657,6 +756,69 @@ mod tests {
         // Both are stored by name, so a rename has to carry the pin across or
         // it would point at a profile that no longer exists.
         assert_eq!(store.default_profile_name()?.as_deref(), Some("client"));
+        Ok(())
+    }
+
+    #[test]
+    fn deletes_a_profile_and_the_state_that_named_it() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+        let profile = store.create_profile("work")?;
+        store.create_profile("personal")?;
+        std::fs::create_dir_all(&profile.omp_home)?;
+        store.save_last_profile("work")?;
+        store.set_default_profile_name(Some("work"))?;
+
+        store.delete_profile("work")?;
+
+        assert!(!profile.claude_home.exists());
+        assert!(!profile.omp_home.exists());
+        assert!(store.load_profile("work").is_err());
+        // A pin left pointing at a deleted profile would break every command
+        // that omits a name, so deleting has to release it.
+        assert_eq!(store.default_profile_name()?, None);
+        assert_eq!(store.last_profile()?, None);
+        assert_eq!(store.fallback_profile_name()?, None);
+        // Only the named profile goes.
+        assert!(store.load_profile("personal").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn leaves_state_naming_another_profile_alone_when_deleting() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+        store.create_profile("work")?;
+        store.create_profile("personal")?;
+        store.set_default_profile_name(Some("personal"))?;
+        store.save_last_profile("personal")?;
+
+        store.delete_profile("work")?;
+
+        assert_eq!(store.default_profile_name()?.as_deref(), Some("personal"));
+        assert_eq!(store.last_profile()?.as_deref(), Some("personal"));
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_to_delete_what_it_does_not_own() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+
+        // The reserved profile is the user's own configuration, so deleting it
+        // would take a setup Ditto never created.
+        assert!(store.delete_profile(DEFAULT_PROFILE).is_err());
+        assert!(store.delete_profile("missing").is_err());
+        assert!(store.delete_profile("../escape").is_err());
         Ok(())
     }
 

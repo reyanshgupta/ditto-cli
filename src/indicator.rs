@@ -7,9 +7,8 @@
 
 use std::{
     env, fs,
-    io::{self, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
-    process,
 };
 
 use anyhow::{Context, Result, bail};
@@ -17,7 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     launch::Tool,
-    profile::{DEFAULT_PROFILE, Profile, secure_file},
+    profile::{DEFAULT_PROFILE, Profile, write_private_file},
 };
 
 /// Claude Code's per-directory settings file, which is also where a profile
@@ -59,21 +58,33 @@ impl Indicator {
             Self::Foreign => "left alone: this profile has its own status line",
         }
     }
+
+    /// The stable name for this outcome in JSON output. See [`Tool::key`].
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::AlreadyOn => "already_on",
+            Self::Removed => "removed",
+            Self::Off => "off",
+            Self::Foreign => "foreign",
+        }
+    }
+
+    /// Whether the status line is showing once this outcome has happened, which
+    /// is what a caller checking the setting actually wants to know.
+    pub fn is_on(self) -> bool {
+        matches!(self, Self::Installed | Self::AlreadyOn)
+    }
 }
 
 /// Adds the Ditto status line unless the profile already carries one of its
 /// own. Someone who configured a status line meant it, and Claude Code renders
 /// only one, so replacing it would silently take a feature away.
 pub fn enable(profile: &Profile) -> Result<Indicator> {
-    install(profile, &ditto_status_line()?)
-}
-
-/// Takes the entry rather than building it, so a test can install a status line
-/// naming a known path instead of whichever binary happens to be running.
-fn install(profile: &Profile, entry: &Value) -> Result<Indicator> {
+    let entry = ditto_status_line()?;
     update(profile, |settings| match settings.get("statusLine") {
-        Some(existing) if !is_ditto(existing) => (Indicator::Foreign, false),
-        Some(existing) if existing == entry => (Indicator::AlreadyOn, false),
+        Some(existing) if !is_ditto(existing, Some(&entry)) => (Indicator::Foreign, false),
+        Some(existing) if *existing == entry => (Indicator::AlreadyOn, false),
         _ => {
             settings.insert("statusLine".to_owned(), entry.clone());
             (Indicator::Installed, true)
@@ -82,9 +93,10 @@ fn install(profile: &Profile, entry: &Value) -> Result<Indicator> {
 }
 
 pub fn disable(profile: &Profile) -> Result<Indicator> {
+    let ours = ditto_status_line().ok();
     update(profile, |settings| match settings.get("statusLine") {
         None => (Indicator::Off, false),
-        Some(existing) if !is_ditto(existing) => (Indicator::Foreign, false),
+        Some(existing) if !is_ditto(existing, ours.as_ref()) => (Indicator::Foreign, false),
         Some(_) => {
             settings.remove("statusLine");
             (Indicator::Removed, true)
@@ -93,10 +105,11 @@ pub fn disable(profile: &Profile) -> Result<Indicator> {
 }
 
 pub fn state(profile: &Profile) -> Result<Indicator> {
+    let ours = ditto_status_line().ok();
     let settings = read(&settings_path(profile))?;
     Ok(match settings.get("statusLine") {
         None => Indicator::Off,
-        Some(existing) if is_ditto(existing) => Indicator::AlreadyOn,
+        Some(existing) if is_ditto(existing, ours.as_ref()) => Indicator::AlreadyOn,
         Some(_) => Indicator::Foreign,
     })
 }
@@ -147,27 +160,11 @@ fn read(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
-/// Replaces the file in one step so a crash cannot leave Claude Code with a
-/// half-written settings file it refuses to start from.
 fn write(path: &Path, settings: &Map<String, Value>) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("{} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
-
     let mut contents = serde_json::to_string_pretty(settings)
         .context("could not serialize Claude Code settings")?;
     contents.push('\n');
-
-    let temporary = parent.join(format!(".{SETTINGS}.{}.tmp", process::id()));
-    fs::write(&temporary, contents)
-        .with_context(|| format!("could not write {}", temporary.display()))?;
-    secure_file(&temporary)?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error).with_context(|| format!("could not replace {}", path.display()));
-    }
-    Ok(())
+    write_private_file(path, &contents)
 }
 
 fn ditto_status_line() -> Result<Value> {
@@ -182,13 +179,32 @@ fn status_line_entry(executable: &str) -> Value {
 
 /// Claude Code runs the command through a shell, so a home directory with a
 /// space or a quote in it has to survive the trip.
+#[cfg(not(windows))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Recognises a command Ditto wrote. It always names the Ditto binary and ends
-/// in the subcommand, which no hand-written status line would do by accident.
-fn is_ditto(entry: &Value) -> bool {
+/// The shell on Windows is the command prompt, which treats a single quote as
+/// an ordinary character and would look for a program whose name begins with
+/// one. Double quotes are the only grouping it understands, and a path cannot
+/// contain one, so there is nothing left to escape inside them.
+#[cfg(windows)]
+fn shell_quote(value: &str) -> String {
+    format!("\"{value}\"")
+}
+
+/// Recognises a command Ditto wrote, given the one it would write now.
+///
+/// The entry Ditto is about to install is its own by definition, whatever the
+/// binary happens to be called. Beyond that the name has to carry the claim: an
+/// entry left by an earlier install, from a directory this copy was never in,
+/// still has to be recognised as Ditto's rather than mistaken for the user's
+/// and left in place forever. Naming the binary and ending in the subcommand is
+/// what no hand-written status line would do by accident.
+fn is_ditto(entry: &Value, ours: Option<&Value>) -> bool {
+    if ours == Some(entry) {
+        return true;
+    }
     entry
         .get("command")
         .and_then(Value::as_str)
@@ -283,8 +299,11 @@ pub fn announce(tool: Tool, profile: &Profile) {
     if sets_own_title(tool) || !stdout.is_terminal() {
         return;
     }
-    let _ = write!(stdout, "\u{1b}]0;{}\u{7}", title(tool, profile));
-    let _ = stdout.flush();
+    // Through crossterm rather than by writing the escape sequence directly: a
+    // Windows console that has not been put into virtual terminal mode prints
+    // the sequence instead of obeying it, and crossterm reaches for the console
+    // API there instead.
+    let _ = crossterm::execute!(stdout, crossterm::terminal::SetTitle(title(tool, profile)));
 }
 
 #[cfg(test)]
@@ -312,15 +331,6 @@ mod tests {
         read(&settings_path(profile)).unwrap()
     }
 
-    /// A status line naming an installed Ditto, so these tests do not depend on
-    /// where the test binary itself was built. Under `cargo test` the running
-    /// executable is `deps/ditto_cli-<hash>`, which `is_ditto` does not
-    /// recognise; asserting against it only ever passed because the build path
-    /// happened to sit under a directory called `ditto-cli`.
-    fn installed_entry() -> Value {
-        status_line_entry("/usr/local/bin/ditto-cli")
-    }
-
     #[test]
     fn installs_once_and_leaves_the_rest_of_the_settings_alone() -> Result<()> {
         let temporary = tempfile::tempdir()?;
@@ -331,17 +341,19 @@ mod tests {
             r#"{"theme":"dark","model":"opus"}"#,
         )?;
 
-        let entry = installed_entry();
-        assert_eq!(install(&profile, &entry)?, Indicator::Installed);
+        assert_eq!(enable(&profile)?, Indicator::Installed);
         assert_eq!(state(&profile)?, Indicator::AlreadyOn);
         // A second call must not rewrite a file that already says the right
         // thing, or every launch would churn the user's settings.
-        assert_eq!(install(&profile, &entry)?, Indicator::AlreadyOn);
+        assert_eq!(enable(&profile)?, Indicator::AlreadyOn);
 
         let installed = settings(&profile);
         assert_eq!(installed["theme"], "dark");
         assert_eq!(installed["model"], "opus");
-        assert!(is_ditto(&installed["statusLine"]));
+        assert!(is_ditto(
+            &installed["statusLine"],
+            ditto_status_line().ok().as_ref()
+        ));
 
         assert_eq!(disable(&profile)?, Indicator::Removed);
         assert_eq!(state(&profile)?, Indicator::Off);
@@ -358,7 +370,7 @@ mod tests {
         let theirs = r#"{"statusLine":{"type":"command","command":"bash ~/mine.sh"}}"#;
         fs::write(settings_path(&profile), theirs)?;
 
-        assert_eq!(install(&profile, &installed_entry())?, Indicator::Foreign);
+        assert_eq!(enable(&profile)?, Indicator::Foreign);
         assert_eq!(state(&profile)?, Indicator::Foreign);
         assert_eq!(disable(&profile)?, Indicator::Foreign);
         assert_eq!(
@@ -374,8 +386,8 @@ mod tests {
         let profile = profile(temporary.path());
 
         assert_eq!(state(&profile)?, Indicator::Off);
-        assert_eq!(install(&profile, &installed_entry())?, Indicator::Installed);
-        assert!(is_ditto(&settings(&profile)["statusLine"]));
+        assert_eq!(enable(&profile)?, Indicator::Installed);
+        assert_eq!(state(&profile)?, Indicator::AlreadyOn);
         Ok(())
     }
 
@@ -387,7 +399,7 @@ mod tests {
         fs::write(settings_path(&profile), "{ not json")?;
 
         // Overwriting here would throw away whatever the user meant to write.
-        assert!(install(&profile, &installed_entry()).is_err());
+        assert!(enable(&profile).is_err());
         assert_eq!(fs::read_to_string(settings_path(&profile))?, "{ not json");
         Ok(())
     }
@@ -409,22 +421,38 @@ mod tests {
 
     #[test]
     fn recognises_only_the_command_it_writes() {
-        assert!(is_ditto(&installed_entry()));
-        // Recognition is by binary name, so a Ditto installed under a different
-        // one is not recognised. That only ever hides a status line Ditto wrote
-        // from a later `--off`, never overwrites one the user configured.
-        assert!(!is_ditto(&status_line_entry("/usr/local/bin/ditto")));
-        assert!(!is_ditto(&serde_json::json!({
-            "type": "command",
-            "command": "bash ~/statusline.sh",
-        })));
+        let installed = status_line_entry("/usr/local/bin/ditto-cli");
+        let theirs = |command: &str| serde_json::json!({ "type": "command", "command": command });
+
+        assert!(is_ditto(&installed, Some(&installed)));
+        // An earlier install, from a directory this copy has never been in.
+        assert!(is_ditto(
+            &status_line_entry("/opt/ditto-cli/bin/ditto-cli"),
+            Some(&installed)
+        ));
+        assert!(!is_ditto(&theirs("bash ~/statusline.sh"), Some(&installed)));
         // A script that merely mentions Ditto is still the user's.
-        assert!(!is_ditto(&serde_json::json!({
-            "type": "command",
-            "command": "ditto-cli status | head -1",
-        })));
+        assert!(!is_ditto(
+            &theirs("ditto-cli status | head -1"),
+            Some(&installed)
+        ));
     }
 
+    /// The binary is not always called `ditto-cli`: `cargo test` builds it as
+    /// `ditto_cli-<hash>`, and nothing stops a user renaming their copy. What
+    /// Ditto has just written is Ditto's whatever it is called, or `enable`
+    /// would install a status line and then report it as somebody else's.
+    #[test]
+    fn recognises_its_own_entry_whatever_the_binary_is_called() {
+        let ours = status_line_entry("/home/u/bin/statusline-helper");
+
+        assert!(is_ditto(&ours, Some(&ours)));
+        // Without that same copy to compare against there is nothing in the
+        // command to claim, and an unclaimed status line is left alone.
+        assert!(!is_ditto(&ours, None));
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn quotes_paths_a_shell_would_otherwise_split() {
         assert_eq!(
@@ -434,6 +462,21 @@ mod tests {
         assert_eq!(
             shell_quote("/o'clock/ditto-cli"),
             r"'/o'\''clock/ditto-cli'"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quotes_paths_the_command_prompt_would_otherwise_split() {
+        assert_eq!(
+            shell_quote(r"C:\Program Files\ditto\ditto-cli.exe"),
+            "\"C:\\Program Files\\ditto\\ditto-cli.exe\""
+        );
+        // A single quote is an ordinary character in a Windows path and must
+        // stay one rather than being taken for punctuation.
+        assert_eq!(
+            shell_quote(r"C:\o'clock\ditto-cli.exe"),
+            "\"C:\\o'clock\\ditto-cli.exe\""
         );
     }
 

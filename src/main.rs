@@ -2,20 +2,25 @@ mod cli;
 mod indicator;
 mod launch;
 mod profile;
+mod program;
 #[cfg(unix)]
 mod proxy;
 mod ui;
 mod update;
 mod workspace;
 
-use std::path::PathBuf;
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
+use serde_json::{Value, json};
 
 use cli::{
-    AutoState, Cli, Command, IndicatorAction, IndicatorArgs, LaunchArgs, WorkspaceArgs,
-    WorkspaceCommand,
+    AutoState, Cli, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
+    IndicatorArgs, LaunchArgs, WorkspaceArgs, WorkspaceCommand,
 };
 use launch::{AuthStatus, Tool};
 use profile::{DEFAULT_PROFILE, Profile, Store};
@@ -23,8 +28,18 @@ use workspace::{WORKSPACE_FILE, Workspaces};
 
 fn main() {
     restore_sigpipe();
-    if let Err(error) = run() {
-        eprintln!("ditto-cli: {error:#}");
+
+    let cli = Cli::parse();
+    // Read before the command is consumed, so a failure can answer in the shape
+    // the caller asked for rather than dropping to prose halfway through.
+    let json = cli.json;
+
+    if let Err(error) = run(cli) {
+        if json {
+            eprintln!("{}", json!({ "error": format!("{error:#}") }));
+        } else {
+            eprintln!("ditto-cli: {error:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -49,19 +64,29 @@ fn restore_sigpipe() {
 #[cfg(not(unix))]
 fn restore_sigpipe() {}
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn run(cli: Cli) -> Result<()> {
     let store = Store::discover()?;
     let workspaces = Workspaces::new(&store);
+    let json = cli.json;
 
     match cli.command {
         None => run_tui(&store, &workspaces),
-        Some(Command::List) => list_profiles(&store),
-        Some(Command::Status { profile }) => show_status(&store, &workspaces, profile.as_deref()),
-        Some(Command::Create { name }) => create_profile(&store, &name),
-        Some(Command::Rename { profile, new_name }) => rename_profile(&store, &profile, &new_name),
-        Some(Command::Workspace(arguments)) => run_workspace(&store, &workspaces, arguments),
-        Some(Command::Paths { profile }) => show_paths(&store, &workspaces, profile.as_deref()),
+        Some(Command::List) => list_profiles(&store, &workspaces, json),
+        Some(Command::Status { profile }) => {
+            show_status(&store, &workspaces, profile.as_deref(), json)
+        }
+        Some(Command::Create { name }) => create_profile(&store, &name, json),
+        Some(Command::Rename { profile, new_name }) => {
+            rename_profile(&store, &profile, &new_name, json)
+        }
+        Some(Command::Delete(arguments)) => delete_profile(&store, arguments, json),
+        Some(Command::Default(arguments)) => {
+            set_default_profile(&store, &workspaces, arguments, json)
+        }
+        Some(Command::Workspace(arguments)) => run_workspace(&store, &workspaces, arguments, json),
+        Some(Command::Paths { profile }) => {
+            show_paths(&store, &workspaces, profile.as_deref(), json)
+        }
         Some(Command::Claude(arguments)) => {
             launch_direct(&store, &workspaces, Tool::Claude, arguments)
         }
@@ -72,13 +97,40 @@ fn run() -> Result<()> {
             launch_direct(&store, &workspaces, Tool::Opencode, arguments)
         }
         Some(Command::Omp(arguments)) => launch_direct(&store, &workspaces, Tool::Omp, arguments),
-        Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments),
+        Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
         Some(Command::Statusline) => indicator::render(),
         Some(Command::Update(arguments)) => update::run(arguments.check, arguments.git),
     }
 }
 
+/// Answers in whichever shape the caller asked for. Every reporting command
+/// speaks both, so the choice is made here rather than in each of them.
+fn report(json: bool, payload: impl FnOnce() -> Value, human: impl FnOnce()) {
+    if json {
+        println!("{}", payload());
+    } else {
+        human();
+    }
+}
+
+/// The picker needs a terminal to draw on and a keyboard to read, and gets
+/// neither from a script or an agent. Saying so beats the panic that reaching
+/// for an absent terminal would otherwise raise, and naming the commands that
+/// do work turns a dead end into a next step.
 fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
+    if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
+        bail!(
+            "the profile picker needs an interactive terminal, and this is not one.\n\
+             Every command works without it:\n\
+            \x20 ditto-cli list --json\n\
+            \x20 ditto-cli status <profile> --json\n\
+            \x20 ditto-cli create <profile>\n\
+            \x20 ditto-cli default <profile>\n\
+            \x20 ditto-cli workspace use <profile>\n\
+             Run `ditto-cli --help` for the full set."
+        );
+    }
+
     // The directory decides where the cursor opens, falling back to the last
     // launch as it did before there were workspaces. Resolved once, outside the
     // loop, so signing in and coming back does not move the cursor off the
@@ -114,39 +166,88 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
     }
 }
 
-fn list_profiles(store: &Store) -> Result<()> {
+fn list_profiles(store: &Store, workspaces: &Workspaces, json: bool) -> Result<()> {
     let last_profile = store.last_profile()?;
     let default_profile = store.default_profile_name()?;
-    for profile in store.list_profiles()? {
-        let selected = if last_profile.as_deref() == Some(&profile.name) {
-            "*"
-        } else {
-            " "
-        };
-        let kind = if profile.managed {
-            "isolated"
-        } else {
-            "native"
-        };
-        let pinned = if default_profile.as_deref() == Some(&profile.name) {
-            "  default"
-        } else {
-            ""
-        };
-        println!("{selected} {:<32} {kind}{pinned}", profile.name);
-    }
+    let profiles = store.list_profiles()?;
+    let binding = current_binding(workspaces);
+    let fallback = effective_fallback(store, binding.as_ref())?;
+
+    let is_default = |profile: &Profile| default_profile.as_deref() == Some(&profile.name);
+    let is_last = |profile: &Profile| last_profile.as_deref() == Some(&profile.name);
+
+    report(
+        json,
+        || {
+            json!({
+                "profiles": profiles
+                    .iter()
+                    .map(|profile| json!({
+                        "name": profile.name,
+                        "managed": profile.managed,
+                        "is_default": is_default(profile),
+                        "is_last_selected": is_last(profile),
+                    }))
+                    .collect::<Vec<_>>(),
+                "default_profile": default_profile,
+                "last_profile": last_profile,
+                // What a command with no profile name would actually use, so a
+                // caller does not have to re-derive the precedence rule. The
+                // directory outranks both saved values, so it is answered from
+                // here rather than from the state file alone.
+                "fallback_profile": fallback,
+                "workspace": binding_payload(binding.as_ref()),
+            })
+        },
+        || {
+            for profile in &profiles {
+                let selected = if is_last(profile) { "*" } else { " " };
+                let kind = if profile.managed {
+                    "isolated"
+                } else {
+                    "native"
+                };
+                let pinned = if is_default(profile) { "  default" } else { "" };
+                println!("{selected} {:<32} {kind}{pinned}", profile.name);
+            }
+        },
+    );
     Ok(())
 }
+
 fn show_status(
     store: &Store,
     workspaces: &Workspaces,
     requested_profile: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     let profile = resolve_profile(store, workspaces, requested_profile)?;
-    println!("{}", profile.name);
-    for tool in Tool::ALL {
-        print_auth_status(tool, launch::auth_status(tool, &profile));
-    }
+    let statuses = Tool::ALL.map(|tool| (tool, launch::auth_status(tool, &profile)));
+
+    report(
+        json,
+        || {
+            json!({
+                "profile": profile.name,
+                "managed": profile.managed,
+                "tools": statuses
+                    .iter()
+                    .map(|(tool, status)| json!({
+                        "tool": tool.key(),
+                        "label": tool.label(),
+                        "status": status.key(),
+                        "signed_in": *status == AuthStatus::SignedIn,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        },
+        || {
+            println!("{}", profile.name);
+            for (tool, status) in &statuses {
+                print_auth_status(*tool, *status);
+            }
+        },
+    );
     Ok(())
 }
 
@@ -159,19 +260,38 @@ fn print_auth_status(tool: Tool, status: AuthStatus) {
     println!("  {:<13} {status}", tool.label());
 }
 
-fn create_profile(store: &Store, name: &str) -> Result<()> {
+fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
     let profile = store.create_profile(name)?;
-    println!("Created profile '{}'.", profile.name);
-    print_login_instructions(&profile);
+    report(
+        json,
+        || {
+            let mut created = profile_paths(&profile);
+            // A new profile is signed in to nothing, so the commands that fix
+            // that are part of the answer rather than a note beside it.
+            created["created"] = json!(true);
+            created["sign_in"] = json!({
+                "claude": format!("ditto-cli claude {} -- auth login", profile.name),
+                "codex": format!("ditto-cli codex {} -- login", profile.name),
+                "opencode": format!("ditto-cli opencode {} -- auth login", profile.name),
+                "omp": format!("ditto-cli omp {} (then /login inside OMP)", profile.name),
+            });
+            created
+        },
+        || {
+            println!("Created profile '{}'.", profile.name);
+            print_login_instructions(&profile);
+        },
+    );
     Ok(())
 }
+
 /// Claude Code stores its credentials against the directory it was pointed at,
 /// and renaming moves that directory, so the sign-in cannot survive. Saying so
 /// before the move beats leaving it to be discovered at the next launch.
-fn rename_profile(store: &Store, current_name: &str, new_name: &str) -> Result<()> {
+fn rename_profile(store: &Store, current_name: &str, new_name: &str, json: bool) -> Result<()> {
     let current = store.load_profile(current_name)?;
     let signs_out = launch::auth_status(Tool::Claude, &current) == AuthStatus::SignedIn;
-    if signs_out {
+    if signs_out && !json {
         println!(
             "Claude Code ties its credentials to the profile directory, which this \
              rename moves,\nso '{current_name}' will be signed out."
@@ -180,23 +300,146 @@ fn rename_profile(store: &Store, current_name: &str, new_name: &str) -> Result<(
     }
 
     let profile = store.rename_profile(current_name, new_name)?;
-    println!("Renamed profile '{current_name}' to '{}'.", profile.name);
-    if signs_out {
-        println!();
-        println!("Sign Claude Code back in with:");
-        println!("  ditto-cli claude {} -- auth login", profile.name);
-    }
+    report(
+        json,
+        || {
+            json!({
+                "renamed": true,
+                "from": current_name,
+                "profile": profile.name,
+                // Reported rather than warned about: the caller has already
+                // committed by the time this is read.
+                "claude_signed_out": signs_out,
+            })
+        },
+        || {
+            println!("Renamed profile '{current_name}' to '{}'.", profile.name);
+            if signs_out {
+                println!();
+                println!("Sign Claude Code back in with:");
+                println!("  ditto-cli claude {} -- auth login", profile.name);
+            }
+        },
+    );
     Ok(())
 }
 
-fn set_indicator(store: &Store, workspaces: &Workspaces, arguments: IndicatorArgs) -> Result<()> {
+/// Deleting is the one command that destroys something, so it asks to be meant
+/// rather than merely typed. The refusal names the directories so the caller can
+/// see what the confirmation is actually for.
+fn delete_profile(store: &Store, arguments: DeleteArgs, json: bool) -> Result<()> {
+    let name = arguments.profile;
+    // Load first, so a name that does not exist fails as a missing profile
+    // rather than as a missing confirmation.
+    store.load_profile(&name)?;
+    let targets = store.deletion_targets(&name);
+    let listed = targets
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !arguments.yes {
+        bail!(
+            "deleting '{name}' removes its credentials, settings, and session history \
+             for good:\n{listed}\nPass --yes to confirm."
+        );
+    }
+
+    store.delete_profile(&name)?;
+    report(
+        json,
+        || {
+            json!({
+                "deleted": true,
+                "profile": name,
+                "removed": targets
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>(),
+            })
+        },
+        || {
+            println!("Deleted profile '{name}'.");
+            println!("{listed}");
+        },
+    );
+    Ok(())
+}
+
+/// Shows, pins, or releases the profile that commands fall back to. The pin is
+/// otherwise reachable only by pressing `d` in the picker, which a script and an
+/// agent have no way to do.
+fn set_default_profile(
+    store: &Store,
+    workspaces: &Workspaces,
+    arguments: DefaultArgs,
+    json: bool,
+) -> Result<()> {
+    match arguments.action() {
+        Some(DefaultAction::Pin(name)) => store.set_default_profile_name(Some(name))?,
+        Some(DefaultAction::Clear) => store.set_default_profile_name(None)?,
+        None => {}
+    }
+
+    let default_profile = store.default_profile_name()?;
+    let binding = current_binding(workspaces);
+    let fallback = effective_fallback(store, binding.as_ref())?;
+
+    report(
+        json,
+        || {
+            json!({
+                "default_profile": default_profile,
+                "fallback_profile": fallback,
+                "workspace": binding_payload(binding.as_ref()),
+            })
+        },
+        || {
+            match &default_profile {
+                Some(name) => println!("default profile: {name}"),
+                // Naming what happens instead keeps the empty answer useful.
+                None => println!("no default profile; commands fall back to {fallback}"),
+            }
+            // The pin is not what this directory would actually use, and saying
+            // only the pin would read as though it were.
+            if let Some(binding) = &binding {
+                println!(
+                    "here, {} outranks it and names '{}'",
+                    binding.describe_origin(),
+                    binding.profile
+                );
+            }
+        },
+    );
+    Ok(())
+}
+
+fn set_indicator(
+    store: &Store,
+    workspaces: &Workspaces,
+    arguments: IndicatorArgs,
+    json: bool,
+) -> Result<()> {
     let profile = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
     let outcome = match arguments.action() {
         Some(IndicatorAction::On) => indicator::enable(&profile)?,
         Some(IndicatorAction::Off) => indicator::disable(&profile)?,
         None => indicator::state(&profile)?,
     };
-    println!("{}: {}", profile.name, outcome.describe());
+
+    report(
+        json,
+        || {
+            json!({
+                "profile": profile.name,
+                "outcome": outcome.key(),
+                "on": outcome.is_on(),
+                "description": outcome.describe(),
+            })
+        },
+        || println!("{}: {}", profile.name, outcome.describe()),
+    );
     Ok(())
 }
 
@@ -204,18 +447,39 @@ fn show_paths(
     store: &Store,
     workspaces: &Workspaces,
     requested_profile: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     let profile = resolve_profile(store, workspaces, requested_profile)?;
-    println!("profile={}", profile.name);
-    println!("claude={}", profile.claude_home.display());
-    println!("codex={}", profile.codex_home.display());
-    println!("opencode={}", profile.opencode.data_dir().display());
-    println!(
-        "opencode-config={}",
-        profile.opencode.config_dir().display()
+    report(
+        json,
+        || profile_paths(&profile),
+        || {
+            println!("profile={}", profile.name);
+            println!("claude={}", profile.claude_home.display());
+            println!("codex={}", profile.codex_home.display());
+            println!("opencode={}", profile.opencode.data_dir().display());
+            println!(
+                "opencode-config={}",
+                profile.opencode.config_dir().display()
+            );
+            println!("omp={}", profile.omp_home.display());
+        },
     );
-    println!("omp={}", profile.omp_home.display());
     Ok(())
+}
+
+/// The directories a profile owns, in the shape both `paths` and `create`
+/// report them.
+fn profile_paths(profile: &Profile) -> Value {
+    json!({
+        "profile": profile.name,
+        "managed": profile.managed,
+        "claude": profile.claude_home.display().to_string(),
+        "codex": profile.codex_home.display().to_string(),
+        "opencode": profile.opencode.data_dir().display().to_string(),
+        "opencode_config": profile.opencode.config_dir().display().to_string(),
+        "omp": profile.omp_home.display().to_string(),
+    })
 }
 
 fn launch_direct(
@@ -278,6 +542,24 @@ fn resolve_profile(
     store.load_profile(&name)
 }
 
+/// The profile a command naming none would use here: the directory's binding
+/// when it has a usable one, and the saved fallback otherwise.
+///
+/// Both `list` and `default` report this, so the precedence rule is stated once
+/// rather than restated wherever it is answered.
+fn effective_fallback(store: &Store, binding: Option<&workspace::Binding>) -> Result<String> {
+    if let Some(binding) = binding {
+        // A binding naming a profile that no longer exists is one `resolve`
+        // would fall through, so it is not the answer here either.
+        if store.load_profile(&binding.profile).is_ok() {
+            return Ok(binding.profile.clone());
+        }
+    }
+    Ok(store
+        .fallback_profile_name()?
+        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()))
+}
+
 /// The binding covering the current directory. A directory that cannot be read
 /// or a file that cannot be parsed is reported and then ignored, because every
 /// caller has a working answer without one and none of them is worth failing.
@@ -315,30 +597,64 @@ fn auto_bind(store: &Store, workspaces: &Workspaces, profile: &str) -> Result<()
     Ok(())
 }
 
-fn run_workspace(store: &Store, workspaces: &Workspaces, arguments: WorkspaceArgs) -> Result<()> {
+fn run_workspace(
+    store: &Store,
+    workspaces: &Workspaces,
+    arguments: WorkspaceArgs,
+    json: bool,
+) -> Result<()> {
     match arguments.command {
-        None => show_workspace(workspaces),
+        None => show_workspace(workspaces, json),
         Some(WorkspaceCommand::Use {
             profile,
             global,
             path,
-        }) => bind_workspace(store, workspaces, &profile, global, path),
-        Some(WorkspaceCommand::Clear { path }) => clear_workspace(workspaces, path),
-        Some(WorkspaceCommand::List) => list_workspaces(workspaces),
-        Some(WorkspaceCommand::Auto { state }) => set_auto_bind(store, state),
+        }) => bind_workspace(store, workspaces, &profile, global, path, json),
+        Some(WorkspaceCommand::Clear { path }) => clear_workspace(workspaces, path, json),
+        Some(WorkspaceCommand::List) => list_workspaces(workspaces, json),
+        Some(WorkspaceCommand::Auto { state }) => set_auto_bind(store, state, json),
     }
 }
 
-fn show_workspace(workspaces: &Workspaces) -> Result<()> {
-    let directory = current_directory()?;
-    println!("directory={}", directory.display());
-    match workspaces.find(&directory)? {
-        Some(binding) => {
-            println!("profile={}", binding.profile);
-            println!("source={}", binding.describe_origin());
-        }
-        None => println!("profile=<unbound>"),
+/// A binding in the shape every workspace command reports it, or null where
+/// there is none, so a caller can read one field rather than tell an absent
+/// binding apart from a failed lookup.
+fn binding_payload(binding: Option<&workspace::Binding>) -> Value {
+    match binding {
+        Some(binding) => json!({
+            "profile": binding.profile,
+            "directory": binding.directory.display().to_string(),
+            "origin": binding.origin_key(),
+            "source": binding.describe_origin(),
+        }),
+        None => Value::Null,
     }
+}
+
+fn show_workspace(workspaces: &Workspaces, json: bool) -> Result<()> {
+    let directory = current_directory()?;
+    let binding = workspaces.find(&directory)?;
+
+    report(
+        json,
+        || {
+            json!({
+                "directory": directory.display().to_string(),
+                "bound": binding.is_some(),
+                "binding": binding_payload(binding.as_ref()),
+            })
+        },
+        || {
+            println!("directory={}", directory.display());
+            match &binding {
+                Some(binding) => {
+                    println!("profile={}", binding.profile);
+                    println!("source={}", binding.describe_origin());
+                }
+                None => println!("profile=<unbound>"),
+            }
+        },
+    );
     Ok(())
 }
 
@@ -348,77 +664,136 @@ fn bind_workspace(
     profile: &str,
     global: bool,
     path: Option<PathBuf>,
+    json: bool,
 ) -> Result<()> {
     // Checked before anything is written, so a typo cannot leave a directory
     // bound to a profile that has never existed.
     let profile = store.load_profile(profile)?;
     let directory = directory_argument(path)?;
 
-    if global {
+    let (directory, written) = if global {
         let directory = workspaces.bind_registry(&directory, &profile.name)?;
-        println!("Bound {} to '{}'.", directory.display(), profile.name);
-        println!("Recorded in {}.", workspaces.registry_path().display());
+        let written = workspaces.registry_path().display().to_string();
+        (directory, written)
     } else {
         let path = workspaces.bind_file(&directory, &profile.name)?;
-        println!("Bound {} to '{}'.", directory.display(), profile.name);
-        println!("Wrote {}.", path.display());
-    }
+        (directory, path.display().to_string())
+    };
+
+    report(
+        json,
+        || {
+            json!({
+                "profile": profile.name,
+                "directory": directory.display().to_string(),
+                "origin": if global { "registry" } else { "file" },
+                "written": written,
+            })
+        },
+        || {
+            println!("Bound {} to '{}'.", directory.display(), profile.name);
+            if global {
+                println!("Recorded in {written}.");
+            } else {
+                println!("Wrote {written}.");
+            }
+        },
+    );
     Ok(())
 }
 
-fn clear_workspace(workspaces: &Workspaces, path: Option<PathBuf>) -> Result<()> {
+fn clear_workspace(workspaces: &Workspaces, path: Option<PathBuf>, json: bool) -> Result<()> {
     let directory = directory_argument(path)?;
     let removed = workspaces.clear(&directory)?;
-    if removed.is_empty() {
-        println!("{} was not bound.", directory.display());
-    } else {
-        for entry in removed {
-            println!("Removed {entry}.");
-        }
-    }
-
     // Clearing only ever touches the one directory, so an ancestor can still be
-    // answering for it and the user should not have to re-run to discover that.
-    if let Some(binding) = workspaces.find(&directory)? {
-        println!(
-            "{} now inherits '{}' from {}.",
-            directory.display(),
-            binding.profile,
-            binding.describe_origin()
-        );
-    }
-    Ok(())
-}
+    // answering for it and the caller should not have to re-run to discover it.
+    let inherited = workspaces.find(&directory)?;
 
-fn list_workspaces(workspaces: &Workspaces) -> Result<()> {
-    let entries = workspaces.entries()?;
-    if entries.is_empty() {
-        println!("No directories are recorded in the registry.");
-    } else {
-        for (directory, profile) in entries {
-            println!("{:<48} {profile}", directory.display());
-        }
-    }
-
-    // Only the registry can be enumerated. Saying so keeps this from reading as
-    // the complete list of bindings when most of them are usually files.
-    println!();
-    println!(
-        "{WORKSPACE_FILE} files are not listed: they are found by walking up from the directory"
+    report(
+        json,
+        || {
+            json!({
+                "directory": directory.display().to_string(),
+                "removed": removed,
+                "inherits": binding_payload(inherited.as_ref()),
+            })
+        },
+        || {
+            if removed.is_empty() {
+                println!("{} was not bound.", directory.display());
+            } else {
+                for entry in &removed {
+                    println!("Removed {entry}.");
+                }
+            }
+            if let Some(binding) = &inherited {
+                println!(
+                    "{} now inherits '{}' from {}.",
+                    directory.display(),
+                    binding.profile,
+                    binding.describe_origin()
+                );
+            }
+        },
     );
-    println!("Ditto runs in. Run `ditto-cli workspace` to see the one in effect here.");
     Ok(())
 }
 
-fn set_auto_bind(store: &Store, state: Option<AutoState>) -> Result<()> {
+fn list_workspaces(workspaces: &Workspaces, json: bool) -> Result<()> {
+    let entries = workspaces.entries()?;
+
+    report(
+        json,
+        || {
+            json!({
+                "workspaces": entries
+                    .iter()
+                    .map(|(directory, profile)| json!({
+                        "directory": directory.display().to_string(),
+                        "profile": profile,
+                    }))
+                    .collect::<Vec<_>>(),
+                "registry": workspaces.registry_path().display().to_string(),
+                // Files are found by walking up from wherever Ditto runs, so
+                // there is no set of them to enumerate. Saying so in the payload
+                // keeps this from reading as every binding that exists.
+                "includes_files": false,
+            })
+        },
+        || {
+            if entries.is_empty() {
+                println!("No directories are recorded in the registry.");
+            } else {
+                for (directory, profile) in &entries {
+                    println!("{:<48} {profile}", directory.display());
+                }
+            }
+            println!();
+            println!(
+                "{WORKSPACE_FILE} files are not listed: they are found by walking up from the \
+                 directory"
+            );
+            println!("Ditto runs in. Run `ditto-cli workspace` to see the one in effect here.");
+        },
+    );
+    Ok(())
+}
+
+fn set_auto_bind(store: &Store, state: Option<AutoState>, json: bool) -> Result<()> {
     if let Some(state) = state {
         store.set_workspace_auto_bind(state.enabled())?;
     }
 
     let enabled = store.workspace_auto_bind()?;
-    println!(
-        "Launching from an unbound directory {} it.",
-        if enabled { "binds" } else { "does not bind" }
+    report(
+        json,
+        || json!({ "auto_bind": enabled }),
+        || {
+            println!(
+                "Launching from an unbound directory {} it.",
+                if enabled { "binds" } else { "does not bind" }
+            );
+        },
     );
     Ok(())
 }

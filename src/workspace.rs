@@ -48,6 +48,15 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// The stable name for where this binding is written, for callers matching
+    /// on it rather than reading [`Self::describe_origin`].
+    pub fn origin_key(&self) -> &'static str {
+        match self.origin {
+            Origin::File => "file",
+            Origin::Registry => "registry",
+        }
+    }
+
     /// Names the binding by where it is written, since that is what a user has
     /// to open to change it.
     pub fn describe_origin(&self) -> String {

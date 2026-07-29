@@ -48,12 +48,37 @@ jobs:
           fi
           echo "crate_version=${crate_version}" >> "$GITHUB_OUTPUT"
 
+  # The release ships a binary for each platform, so the suite has to pass on
+  # each platform before any of them is built.
+  test:
+    name: Test on ${{ matrix.os }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Run tests
         run: cargo test --locked
 
   publish:
     name: Publish to crates.io
-    needs: verify
+    needs:
+      - verify
+      - test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -107,7 +132,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: verify
+    needs:
+      - verify
+      - test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

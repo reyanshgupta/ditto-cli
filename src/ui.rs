@@ -893,10 +893,12 @@ fn status_row(tool: Tool, status: Option<AuthStatus>, spinner: usize) -> Line<'s
 }
 
 /// Paths are long enough to wrap the detail pane, so the home directory is
-/// abbreviated the way a shell prompt would.
+/// abbreviated the way a shell prompt would. The separator is the platform's
+/// own, so what is shown reads as one path rather than two conventions spliced
+/// together.
 fn shorten_home(path: &Path, user_home: &Path) -> String {
     match path.strip_prefix(user_home) {
-        Ok(relative) => format!("~/{}", relative.display()),
+        Ok(relative) => format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display()),
         Err(_) => path.display().to_string(),
     }
 }
@@ -1013,10 +1015,17 @@ mod tests {
 
     #[test]
     fn abbreviates_paths_inside_the_home_directory() {
+        let separator = std::path::MAIN_SEPARATOR;
         let home = PathBuf::from("/Users/rey");
+        let inside = home
+            .join(".ditto")
+            .join("profiles")
+            .join("work")
+            .join("claude");
+
         assert_eq!(
-            shorten_home(&home.join(".ditto/profiles/work/claude"), &home),
-            "~/.ditto/profiles/work/claude"
+            shorten_home(&inside, &home),
+            format!("~{separator}.ditto{separator}profiles{separator}work{separator}claude")
         );
         assert_eq!(
             shorten_home(Path::new("/opt/shared/claude"), &home),

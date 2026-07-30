@@ -68,7 +68,7 @@ pub enum Command {
     Indicator(IndicatorArgs),
     /// Print the profile status line. Claude Code runs this itself.
     #[command(hide = true)]
-    Statusline,
+    Statusline(StatuslineArgs),
     /// Update Ditto CLI itself.
     Update(UpdateArgs),
 }
@@ -184,17 +184,40 @@ pub struct IndicatorArgs {
     /// Take the profile back out of Claude Code's status line.
     #[arg(long)]
     pub off: bool,
+    /// Keep the status line this profile already has, with the profile drawn
+    /// in front of it. Turns the indicator on.
+    ///
+    /// Without it a profile that has its own status line is left alone, since
+    /// Claude Code draws one status line and the one already there was asked
+    /// for.
+    #[arg(long, conflicts_with = "off")]
+    pub keep_mine: bool,
 }
 
 impl IndicatorArgs {
     /// Neither flag means the command was asked to report rather than change.
+    /// Asking to keep a status line is asking for the indicator as well: there
+    /// is nothing else the answer could mean.
     pub fn action(&self) -> Option<IndicatorAction> {
-        match (self.on, self.off) {
+        match (self.on || self.keep_mine, self.off) {
             (true, _) => Some(IndicatorAction::On),
             (_, true) => Some(IndicatorAction::Off),
             _ => None,
         }
     }
+}
+
+/// Written by Ditto, read by Ditto: Claude Code runs the command in the
+/// settings file exactly as it finds it, so anything the status line needs to
+/// know has to be an argument on that command.
+#[derive(Debug, Args)]
+pub struct StatuslineArgs {
+    /// Status line to draw the profile in front of.
+    #[arg(long, allow_hyphen_values = true)]
+    pub with: Option<String>,
+    /// The same, percent-encoded for a shell that could not carry it literally.
+    #[arg(long, allow_hyphen_values = true, conflicts_with = "with")]
+    pub with_encoded: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -440,8 +463,31 @@ mod tests {
 
     #[test]
     fn parses_the_status_line_command_claude_code_runs() {
-        let cli = Cli::try_parse_from(["ditto-cli", "statusline"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Statusline)));
+        let bare = Cli::try_parse_from(["ditto-cli", "statusline"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Some(Command::Statusline(StatuslineArgs { with, with_encoded }))
+                if with.is_none() && with_encoded.is_none()
+        ));
+
+        // The status line Ditto is drawing in front of arrives as one
+        // argument, whatever it is made of. A command starting with a dash is
+        // still a command and not a flag of Ditto's.
+        let keeping =
+            Cli::try_parse_from(["ditto-cli", "statusline", "--with", "-x | y --with z"]).unwrap();
+        assert!(matches!(
+            keeping.command,
+            Some(Command::Statusline(StatuslineArgs { with: Some(with), .. }))
+                if with == "-x | y --with z"
+        ));
+
+        let encoded =
+            Cli::try_parse_from(["ditto-cli", "statusline", "--with-encoded", "a%20b"]).unwrap();
+        assert!(matches!(
+            encoded.command,
+            Some(Command::Statusline(StatuslineArgs { with_encoded: Some(value), .. }))
+                if value == "a%20b"
+        ));
     }
 
     fn default_args(arguments: &[&str]) -> DefaultArgs {

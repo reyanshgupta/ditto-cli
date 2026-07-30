@@ -43,7 +43,9 @@ claude_home=$(ditto-cli paths work --json | jq -r .claude)
 # then edit "$claude_home/settings.json", "$claude_home/.claude.json", etc.
 ```
 
-The one file Ditto also writes is `<claude_home>/settings.json`, and only its `statusLine` key. If that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it.
+The one file Ditto also writes is `<claude_home>/settings.json`, and only its `statusLine` key. If that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it. `indicator --keep-mine` is the one way to change that entry, and it keeps the original: the installed command becomes `ditto-cli statusline --with '<their command>'`, which runs their status line with Claude Code's payload and prints the profile in front of it. `indicator --off` reads the original back out of that command and puts it in place unchanged.
+
+Claude Code reads settings from several files and the profile's is the lowest-ranking of them, so an entry can be installed and never drawn. `Indicator::shadowed` says so, and is applied where a person is being told what happened rather than during a launch, since the answer depends on the directory the command was typed in.
 
 ### Recipes
 
@@ -80,7 +82,7 @@ These strings are an interface. Changing one breaks callers, so treat it as a de
 | --- | --- |
 | `tools[].tool` | `claude`, `codex`, `opencode`, `omp` |
 | `tools[].status` | `signed_in`, `signed_out`, `unavailable` |
-| `indicator.outcome` | `installed`, `already_on`, `removed`, `off`, `foreign` |
+| `indicator.outcome` | `installed`, `already_on`, `alongside`, `removed`, `restored`, `off`, `foreign`, `shadowed` |
 | `profiles[].managed` | `false` only for the reserved `default` profile |
 
 They live in `Tool::key`, `AuthStatus::key`, and `Indicator::key`, each kept deliberately apart from the `label`/`describe` method beside it. Labels are written for a person and may be reworded freely; keys may not.
@@ -128,7 +130,7 @@ cargo clippy --all-targets -- -D warnings
 
 **Writing files.** Use `profile::write_private_file`. It writes a temporary carrying the process id, sets owner-only permissions, then renames over the target, so a crash cannot leave a half-written settings file for a tool to refuse to start from. Never `fs::write` into a profile directory. New directories go through `secure_directory` for the same reason.
 
-**Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place. Extend that pattern rather than working around it.
+**Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place, and `Alongside` exists so that the way to have both is to keep theirs rather than to overwrite it. Extend that pattern rather than working around it: when Ditto has to sit where something of the user's already is, run theirs, keep everything it carried, and be able to hand it back.
 
 **Cross-platform.** Windows is supported. Gate with `#[cfg(unix)]` / `#[cfg(windows)]`, and prefer `crossterm` over writing escape sequences directly. `program.rs` compiles on every platform even though only Windows calls it, on the reasoning that a rule nobody can exercise is a rule nobody checks — keep that property when touching it.
 

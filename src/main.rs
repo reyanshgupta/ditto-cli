@@ -23,6 +23,7 @@ use cli::{
     AutoState, Cli, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
     IndicatorArgs, LaunchArgs, ShellInitArgs, WorkspaceArgs, WorkspaceCommand,
 };
+use indicator::Existing;
 use launch::{AuthStatus, Tool};
 use profile::{Fallback, Profile, Store};
 use workspace::{WORKSPACE_FILE, Workspaces};
@@ -100,7 +101,9 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Omp(arguments)) => launch_direct(&store, &workspaces, Tool::Omp, arguments),
         Some(Command::ShellInit(arguments)) => print_shell_init(arguments),
         Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
-        Some(Command::Statusline) => indicator::render(),
+        Some(Command::Statusline(arguments)) => {
+            indicator::render(arguments.with, arguments.with_encoded)
+        }
         Some(Command::Update(arguments)) => update::run(arguments.check, arguments.git),
     }
 }
@@ -436,11 +439,18 @@ fn set_indicator(
     json: bool,
 ) -> Result<()> {
     let (profile, _) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
-    let outcome = match arguments.action() {
-        Some(IndicatorAction::On) => indicator::enable(&profile)?,
+    let existing = if arguments.keep_mine {
+        Existing::KeepAlongside
+    } else {
+        Existing::LeaveAlone
+    };
+    // Whether the status line will actually be seen depends on the directory
+    // this was typed in, so it is answered here rather than by the profile.
+    let outcome = indicator::shadowed(match arguments.action() {
+        Some(IndicatorAction::On) => indicator::enable(&profile, existing)?,
         Some(IndicatorAction::Off) => indicator::disable(&profile)?,
         None => indicator::state(&profile)?,
-    };
+    });
 
     report(
         json,

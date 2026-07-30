@@ -177,9 +177,10 @@ ditto-cli default client-a    # pin it
 ditto-cli default --clear     # release it
 
 # Show the profile inside Claude Code
-ditto-cli indicator client-a         # report the status line setting
+ditto-cli indicator client-a             # report the status line setting
 ditto-cli indicator client-a --on
 ditto-cli indicator client-a --off
+ditto-cli indicator client-a --keep-mine # in front of the status line you have
 ```
 
 The native authentication commands can be called through a profile too:
@@ -327,7 +328,29 @@ Claude Code gets a status line along the bottom of its interface:
 ⬖ client-a · you@example.com
 ```
 
-Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so: Claude Code renders only one, and replacing yours would quietly take it away. Nothing else in `settings.json` is touched.
+Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. Nothing else in `settings.json` is touched.
+
+If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so. Claude Code renders one status line, and replacing the one you configured would quietly take it away. To have both, ask:
+
+```console
+$ ditto-cli indicator client-a --keep-mine
+client-a: status line on, drawn in front of the one you already had
+```
+
+Ditto CLI then runs your status line itself and prints the profile in front of what it says:
+
+```text
+⬖ client-a · you@example.com │ ⎇ main ✓  ~/code/client-a  12.4k
+```
+
+Your command keeps the payload Claude Code sends it, every line it prints, and the settings it was written with. If it fails or prints nothing, you get the profile on its own rather than a broken line. `ditto-cli indicator --off` puts your original entry back exactly as you wrote it, and a later launch never changes the arrangement on its own — drawing over someone's status line is a thing to be asked for.
+
+A status line set for a project (`.claude/settings.json`, `.claude/settings.local.json`) or by your administrator outranks the profile's, so Ditto CLI's would be installed and never seen. Rather than claim otherwise, `ditto-cli indicator` reports that:
+
+```console
+$ ditto-cli indicator client-a
+client-a: installed, but a status line that outranks it is showing instead
+```
 
 The status line reads `DITTO_PROFILE`, so a `claude` you started yourself still reports the right profile as long as `CLAUDE_CONFIG_DIR` points at one.
 

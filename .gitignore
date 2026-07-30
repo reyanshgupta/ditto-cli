@@ -1,2 +1,5 @@
 /target
 .DS_Store
+# Ditto binds its own repository to whichever profile the person working on it
+# uses, and that is nobody else's business.
+.ditto.toml

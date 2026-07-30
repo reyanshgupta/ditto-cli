@@ -483,11 +483,11 @@ mod tests {
     #[test]
     fn draws_the_profile_with_and_without_an_account() {
         assert_eq!(
-            status_line("share", Some("me@example.com"), false),
-            "⬖ share · me@example.com"
+            status_line("work", Some("me@example.com"), false),
+            "⬖ work · me@example.com"
         );
-        assert_eq!(status_line("share", None, false), "⬖ share");
-        assert!(status_line("share", None, true).contains(PURPLE));
+        assert_eq!(status_line("work", None, false), "⬖ work");
+        assert!(status_line("work", None, true).contains(PURPLE));
     }
 
     #[test]

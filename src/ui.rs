@@ -1016,7 +1016,7 @@ mod tests {
     #[test]
     fn abbreviates_paths_inside_the_home_directory() {
         let separator = std::path::MAIN_SEPARATOR;
-        let home = PathBuf::from("/Users/rey");
+        let home = PathBuf::from("/Users/example");
         let inside = home
             .join(".ditto")
             .join("profiles")

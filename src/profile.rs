@@ -646,7 +646,7 @@ mod tests {
     fn rejects_profile_names_omp_cannot_accept() {
         for name in [
             "Work",
-            "DHA",
+            "ACME",
             ".hidden",
             "-leading",
             "_leading",

@@ -20,6 +20,7 @@ use ratatui::{
 use crate::{
     launch::{self, AuthOperation, AuthStatus, Tool},
     profile::{Profile, Store},
+    settings,
 };
 
 const DITTO_PURPLE: Color = Color::Rgb(190, 134, 255);
@@ -348,6 +349,7 @@ impl<'a> App<'a> {
                 }
                 KeyCode::Enter => match self.store.create_profile(input) {
                     Ok(profile) => {
+                        settings::seed(self.store, &profile);
                         self.select_after_change(&profile.name)?;
                         Ok(Action::Continue)
                     }

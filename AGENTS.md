@@ -15,7 +15,7 @@ ditto-cli list --json
 ditto-cli --json list
 ```
 
-Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
+Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
 
 ### The config an agent can edit
 
@@ -43,7 +43,9 @@ claude_home=$(ditto-cli paths work --json | jq -r .claude)
 # then edit "$claude_home/settings.json", "$claude_home/.claude.json", etc.
 ```
 
-The one file Ditto also writes is `<claude_home>/settings.json`, and only its `statusLine` key. If that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it. `indicator --keep-mine` is the one way to change that entry, and it keeps the original: the installed command becomes `ditto-cli statusline --with '<their command>'`, which runs their status line with Claude Code's payload and prints the profile in front of it. `indicator --off` reads the original back out of that command and puts it in place unchanged.
+The one file Ditto also writes is `<claude_home>/settings.json`, on two occasions and no others. A launch installs the `statusLine` key; if that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it. Creating a profile copies the rest of `~/.claude/settings.json` into it, since `CLAUDE_CONFIG_DIR` moves the whole user settings layer and the profile would otherwise have no permission mode, model, or hooks. `ditto-cli sync <profile>` does the same copy on demand, filling in keys the profile has never set and leaving the ones it has unless `--overwrite` is passed. `statusLine` is the one key never copied: it names the profile it was installed for.
+
+`indicator --keep-mine` is the one thing that changes a `statusLine` Ditto did not write, and it keeps the original: the installed command becomes `ditto-cli statusline --with '<their command>'`, which runs their status line with Claude Code's payload and prints the profile in front of it. `indicator --off` reads the original back out of that command and puts it in place unchanged.
 
 Claude Code reads settings from several files and the profile's is the lowest-ranking of them, so an entry can be installed and never drawn. `Indicator::shadowed` says so, and is applied where a person is being told what happened rather than during a launch, since the answer depends on the directory the command was typed in.
 
@@ -53,6 +55,10 @@ Claude Code reads settings from several files and the profile's is the lowest-ra
 # Create a profile and make it the one unnamed commands use.
 ditto-cli create work --json
 ditto-cli default work --json
+
+# Bring a profile's Claude Code settings up to the user's own. `copied` names
+# the keys written, `kept` the ones the profile had already answered.
+ditto-cli sync work --json
 
 # Which profiles exist, and which would a bare command use?
 ditto-cli list --json | jq '{fallback: .fallback_profile, names: [.profiles[].name]}'
@@ -100,6 +106,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `profile.rs` | `Store` and `Profile`: where a profile's directories are, creating, renaming, deleting, and `state.toml`. Also `write_private_file`, the atomic owner-only write everything else uses. |
 | `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
+| `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
@@ -130,7 +137,7 @@ cargo clippy --all-targets -- -D warnings
 
 **Writing files.** Use `profile::write_private_file`. It writes a temporary carrying the process id, sets owner-only permissions, then renames over the target, so a crash cannot leave a half-written settings file for a tool to refuse to start from. Never `fs::write` into a profile directory. New directories go through `secure_directory` for the same reason.
 
-**Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place, and `Alongside` exists so that the way to have both is to keep theirs rather than to overwrite it. Extend that pattern rather than working around it: when Ditto has to sit where something of the user's already is, run theirs, keep everything it carried, and be able to hand it back.
+**Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place, `Alongside` exists so that the way to have both is to keep theirs rather than to overwrite it, and `settings::copy` withholds every key the profile has already answered unless `--overwrite` asks for it. Extend that pattern rather than working around it: when Ditto has to sit where something of the user's already is, run theirs, keep everything it carried, and be able to hand it back.
 
 **Cross-platform.** Windows is supported. Gate with `#[cfg(unix)]` / `#[cfg(windows)]`, and prefer `crossterm` over writing escape sequences directly. `program.rs` compiles on every platform even though only Windows calls it, on the reasoning that a rule nobody can exercise is a rule nobody checks — keep that property when touching it.
 

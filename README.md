@@ -148,6 +148,7 @@ ditto-cli delete work --yes   # removes credentials and sessions for good
 ditto-cli list
 ditto-cli status client-a     # sign-in state for all four tools
 ditto-cli paths client-a
+ditto-cli sync client-a       # re-copy your Claude Code settings into it
 
 # Launch a tool, with short aliases for the first three
 ditto-cli claude client-a     # or: cc
@@ -328,7 +329,7 @@ Claude Code gets a status line along the bottom of its interface:
 ⬖ client-a · you@example.com
 ```
 
-Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. Nothing else in `settings.json` is touched.
+Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. The rest of `settings.json` is written only when a profile is created or synced, described in [settings a new profile inherits](#settings-a-new-profile-inherits).
 
 If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so. Claude Code renders one status line, and replacing the one you configured would quietly take it away. To have both, ask:
 
@@ -396,6 +397,21 @@ ditto-cli status client-a --json | jq -r '.tools[] | select(.signed_in | not) | 
 ```
 
 The `tool`, `status`, and `indicator` outcome strings are stable identifiers meant to be matched on; the `label` beside them is display text and may be reworded. [AGENTS.md](AGENTS.md) documents the full contract and has more recipes, along with how to edit Ditto CLI itself.
+
+## Settings a new profile inherits
+
+Claude Code reads its settings from the configuration directory it is pointed at, and Ditto CLI points it somewhere else. Left alone, a new profile would start with none of the permission mode, model, effort level, or hooks you set up once and expect everywhere.
+
+So creating a profile copies `~/.claude/settings.json` into it. What Ditto CLI isolates is accounts, and none of those live in that file — Claude Code keeps credentials in the Keychain and the signed-in account in `.claude.json` — so your preferences travel and your logins stay apart. The status line is the one key not copied, because it names the profile it was installed for.
+
+From then on the profile's settings are its own. Change the model in one profile and the others keep theirs; a later `ditto-cli sync` fills in settings the profile has never answered and leaves the ones it has:
+
+```bash
+ditto-cli sync client-a              # bring it up to date, keeping its own answers
+ditto-cli sync client-a --overwrite  # your configuration wins outright
+```
+
+`sync` is also how profiles created before this behaviour existed catch up.
 
 ## Where credentials and files are stored
 

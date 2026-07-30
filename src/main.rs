@@ -5,6 +5,7 @@ mod profile;
 mod program;
 #[cfg(unix)]
 mod proxy;
+mod settings;
 mod shell;
 mod ui;
 mod update;
@@ -21,10 +22,10 @@ use serde_json::{Value, json};
 
 use cli::{
     AutoState, Cli, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
-    IndicatorArgs, LaunchArgs, ShellInitArgs, WorkspaceArgs, WorkspaceCommand,
+    IndicatorArgs, LaunchArgs, ShellInitArgs, SyncArgs, WorkspaceArgs, WorkspaceCommand,
 };
 use launch::{AuthStatus, Tool};
-use profile::{Fallback, Profile, Store};
+use profile::{DEFAULT_PROFILE, Fallback, Profile, Store};
 use workspace::{WORKSPACE_FILE, Workspaces};
 
 fn main() {
@@ -81,6 +82,7 @@ fn run(cli: Cli) -> Result<()> {
             rename_profile(&store, &profile, &new_name, json)
         }
         Some(Command::Delete(arguments)) => delete_profile(&store, arguments, json),
+        Some(Command::Sync(arguments)) => sync_settings(&store, &workspaces, arguments, json),
         Some(Command::Default(arguments)) => {
             set_default_profile(&store, &workspaces, arguments, json)
         }
@@ -264,6 +266,11 @@ fn print_auth_status(tool: Tool, status: AuthStatus) {
 
 fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
     let profile = store.create_profile(name)?;
+    // Claude Code reads its settings from the directory a launch moves, so a
+    // new profile would otherwise start with none of the permission mode,
+    // model, or hooks its owner set up once and expects everywhere.
+    let copied = settings::seed(store, &profile);
+
     report(
         json,
         || {
@@ -271,6 +278,7 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             // A new profile is signed in to nothing, so the commands that fix
             // that are part of the answer rather than a note beside it.
             created["created"] = json!(true);
+            created["settings_copied"] = json!(copied.copied);
             created["sign_in"] = json!({
                 "claude": format!("ditto-cli claude {} -- auth login", profile.name),
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
@@ -281,7 +289,66 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
         },
         || {
             println!("Created profile '{}'.", profile.name);
+            if copied.changed() {
+                println!(
+                    "Copied your Claude Code settings into it: {}.",
+                    copied.copied.join(", ")
+                );
+            }
             print_login_instructions(&profile);
+        },
+    );
+    Ok(())
+}
+
+/// Brings a profile that already exists up to the settings a new one would be
+/// created with. Profiles made before Ditto copied anything started empty, and
+/// a setting changed since then reaches them no other way.
+fn sync_settings(
+    store: &Store,
+    workspaces: &Workspaces,
+    arguments: SyncArgs,
+    json: bool,
+) -> Result<()> {
+    let (profile, _) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
+    let source = store.load_profile(DEFAULT_PROFILE)?;
+    let copied = settings::copy(&source, &profile, arguments.overwrite)?;
+
+    report(
+        json,
+        || {
+            json!({
+                "profile": profile.name,
+                "source": source.name,
+                "copied": copied.copied,
+                "kept": copied.kept,
+                "changed": copied.changed(),
+            })
+        },
+        || {
+            if copied.changed() {
+                println!(
+                    "Copied into '{}': {}.",
+                    profile.name,
+                    copied.copied.join(", ")
+                );
+            } else {
+                println!(
+                    "'{}' already has every setting your own configuration sets.",
+                    profile.name
+                );
+            }
+            if !copied.kept.is_empty() {
+                println!(
+                    "Left '{}' as it is for: {}.",
+                    profile.name,
+                    copied.kept.join(", ")
+                );
+                println!(
+                    "  Replace those too with `ditto-cli sync {} --overwrite`.",
+                    profile.name
+                );
+            }
         },
     );
     Ok(())

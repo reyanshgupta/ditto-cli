@@ -11,17 +11,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::{
     launch::Tool,
-    profile::{DEFAULT_PROFILE, Profile, write_private_file},
+    profile::{DEFAULT_PROFILE, Profile},
+    settings::{path as settings_path, read, write},
 };
 
-/// Claude Code's per-directory settings file, which is also where a profile
-/// keeps the status line Ditto installs.
-const SETTINGS: &str = "settings.json";
 /// The Ditto subcommand Claude Code runs to draw the status line.
 const SUBCOMMAND: &str = "statusline";
 /// Names the binary in an installed command, so an entry Ditto wrote can be
@@ -132,39 +130,6 @@ fn update(
         write(&path, &settings)?;
     }
     Ok(outcome)
-}
-
-fn settings_path(profile: &Profile) -> PathBuf {
-    profile.claude_home.join(SETTINGS)
-}
-
-/// A profile that has never run Claude Code has no settings file yet, which
-/// reads the same as one with nothing configured.
-fn read(path: &Path) -> Result<Map<String, Value>> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not read {}", path.display()));
-        }
-    };
-    if contents.trim().is_empty() {
-        return Ok(Map::new());
-    }
-
-    match serde_json::from_str(&contents)
-        .with_context(|| format!("could not parse {}", path.display()))?
-    {
-        Value::Object(settings) => Ok(settings),
-        _ => bail!("{} does not hold a JSON object", path.display()),
-    }
-}
-
-fn write(path: &Path, settings: &Map<String, Value>) -> Result<()> {
-    let mut contents = serde_json::to_string_pretty(settings)
-        .context("could not serialize Claude Code settings")?;
-    contents.push('\n');
-    write_private_file(path, &contents)
 }
 
 fn ditto_status_line() -> Result<Value> {

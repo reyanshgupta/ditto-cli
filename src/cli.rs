@@ -42,6 +42,8 @@ pub enum Command {
     },
     /// Delete an isolated profile and everything inside it.
     Delete(DeleteArgs),
+    /// Copy your own Claude Code settings into an isolated profile.
+    Sync(SyncArgs),
     /// Show, pin, or release the profile commands use when none is named.
     Default(DefaultArgs),
     /// Show or change the profile a directory launches with.
@@ -148,6 +150,18 @@ pub struct DeleteArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Profile to copy into. Uses the saved profile when omitted.
+    pub profile: Option<String>,
+    /// Replace the settings this profile has already answered for itself.
+    ///
+    /// Without it a profile keeps every setting it has changed, which is what
+    /// makes it worth having; with it your own configuration wins outright.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct DefaultArgs {
     /// Profile to pin. Reports the current pin when omitted.
     pub profile: Option<String>,
@@ -238,6 +252,23 @@ mod tests {
             }) if profile == "work" && new_name == "client"
         ));
     }
+    #[test]
+    fn parses_sync_arguments() {
+        let named = Cli::try_parse_from(["ditto-cli", "sync", "work"]).unwrap();
+        assert!(matches!(
+            named.command,
+            Some(Command::Sync(SyncArgs { profile, overwrite }))
+                if profile.as_deref() == Some("work") && !overwrite
+        ));
+
+        let bare = Cli::try_parse_from(["ditto-cli", "sync", "--overwrite"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Some(Command::Sync(SyncArgs { profile, overwrite }))
+                if profile.is_none() && overwrite
+        ));
+    }
+
     #[test]
     fn parses_update_flags() {
         let plain = Cli::try_parse_from(["ditto-cli", "update"]).unwrap();

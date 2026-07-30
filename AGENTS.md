@@ -15,7 +15,7 @@ ditto-cli list --json
 ditto-cli --json list
 ```
 
-Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only.
+Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
 
 ### The config an agent can edit
 
@@ -34,7 +34,7 @@ ditto-cli default work           # pin 'work'
 ditto-cli default --clear        # release it
 ```
 
-Precedence when a command omits the profile name: `default_profile`, then `last_profile`, then the reserved `default` profile. `list --json` reports all three plus `fallback_profile`, which is the answer that precedence produces — read that instead of re-deriving the rule.
+Precedence when a command omits the profile name: the directory's binding (see `workspace`), then `default_profile`, then `last_profile`, then the reserved `default` profile. `list --json` reports the saved values plus `fallback_profile`, which is the answer that precedence produces — read that instead of re-deriving the rule. A launch that reaches the saved values says so on stderr, naming the profile and which value chose it; the reporting commands stay quiet.
 
 A profile's own directories are the tools' config, not Ditto's. `ditto-cli paths <profile> --json` gives you the roots; edit files under them with ordinary tools:
 
@@ -101,6 +101,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
+| `shell.rs` | The `shell-init` functions that route a tool's own name through Ditto, and reading `SHELL` to pick a dialect. |
 | `update.rs` | `ditto-cli update`, which shells out to `cargo install`. |
 
 ### Checks
@@ -146,7 +147,7 @@ cargo clippy --all-targets -- -D warnings
 
 ### Adding a tool
 
-Extend `Tool` in `launch.rs`: `ALL`, `label`, `key`, `executable` (with its `DITTO_*_BIN` override), the status args in `auth_status`, and `AuthOperation::args`. Then give it a home in `Profile` and `Store::managed_profile`/`default_profile` in `profile.rs`, add it to `create_profile`'s directory list, and surface it in `paths`, `status`, and `ui.rs`.
+Extend `Tool` in `launch.rs`: `ALL`, `label`, `key`, `executable` (with its `DITTO_*_BIN` override), the status args in `auth_status`, and `AuthOperation::args`. Then give it a home in `Profile` and `Store::managed_profile`/`default_profile` in `profile.rs`, add it to `create_profile`'s directory list, and surface it in `paths`, `status`, and `ui.rs`. `shell.rs` needs nothing: it writes a function for every entry in `Tool::ALL`, and a test fails if one is missing.
 
 ### Versioning
 

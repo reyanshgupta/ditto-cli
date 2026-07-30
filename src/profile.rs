@@ -85,6 +85,41 @@ pub struct Store {
     native_opencode: OpencodeHome,
 }
 
+/// The saved profile a command that named none falls back to, and which saved
+/// value it came from.
+///
+/// The reason travels with the name because a launch that nobody pointed at a
+/// profile is the one worth explaining, and explaining it anywhere else would
+/// mean restating the precedence rule outside the one place that decides it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Fallback {
+    /// Pinned with `ditto-cli default`, or with `d` in the picker.
+    Pinned(String),
+    /// The profile of the most recent launch, with no pin to outrank it.
+    Last(String),
+    /// Nothing is saved yet, which is every run before the first launch.
+    Reserved,
+}
+
+impl Fallback {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Pinned(name) | Self::Last(name) => name,
+            Self::Reserved => DEFAULT_PROFILE,
+        }
+    }
+
+    /// Completes the sentence "it is ...", so a launch can say why it arrived
+    /// at a profile in one line rather than in a paragraph nobody reads.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::Pinned(_) => "pinned as the default",
+            Self::Last(_) => "the profile launched last",
+            Self::Reserved => "your own configuration, which nothing has replaced yet",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct State {
     /// The profile of the most recent launch. Every launch moves it.
@@ -363,12 +398,17 @@ impl Store {
         Ok(self.read_state()?.default_profile)
     }
 
-    /// The profile a command uses when it does not name one. A pin outranks
-    /// the last launch, so launching another profile once does not move it.
-    /// Both come from one read so a concurrent write cannot be half seen.
-    pub fn fallback_profile_name(&self) -> Result<Option<String>> {
+    /// The profile a command uses when it does not name one, and which saved
+    /// value chose it. A pin outranks the last launch, so launching another
+    /// profile once does not move it. Both come from one read so a concurrent
+    /// write cannot be half seen.
+    pub fn fallback_profile(&self) -> Result<Fallback> {
         let state = self.read_state()?;
-        Ok(state.default_profile.or(state.last_profile))
+        Ok(match (state.default_profile, state.last_profile) {
+            (Some(name), _) => Fallback::Pinned(name),
+            (None, Some(name)) => Fallback::Last(name),
+            (None, None) => Fallback::Reserved,
+        })
     }
 
     pub fn save_last_profile(&self, name: &str) -> Result<()> {
@@ -712,14 +752,22 @@ mod tests {
         // profile is exactly what the pin is supposed to survive.
         assert_eq!(store.default_profile_name()?.as_deref(), Some("work"));
         assert_eq!(store.last_profile()?.as_deref(), Some("personal"));
-        assert_eq!(store.fallback_profile_name()?.as_deref(), Some("work"));
+        // The fallback carries which value answered, not just the name, because
+        // a launch nobody pointed at a profile has to be able to say why.
+        assert_eq!(
+            store.fallback_profile()?,
+            Fallback::Pinned("work".to_owned())
+        );
 
         // Releasing the pin hands the fallback back to the last launch rather
         // than dropping all the way to the reserved profile.
         store.set_default_profile_name(None)?;
         assert_eq!(store.default_profile_name()?, None);
         assert_eq!(store.last_profile()?.as_deref(), Some("personal"));
-        assert_eq!(store.fallback_profile_name()?.as_deref(), Some("personal"));
+        assert_eq!(
+            store.fallback_profile()?,
+            Fallback::Last("personal".to_owned())
+        );
         Ok(())
     }
 
@@ -805,7 +853,8 @@ mod tests {
         // that omits a name, so deleting has to release it.
         assert_eq!(store.default_profile_name()?, None);
         assert_eq!(store.last_profile()?, None);
-        assert_eq!(store.fallback_profile_name()?, None);
+        assert_eq!(store.fallback_profile()?, Fallback::Reserved);
+        assert_eq!(store.fallback_profile()?.name(), DEFAULT_PROFILE);
         // Only the named profile goes.
         assert!(store.load_profile("personal").is_ok());
         Ok(())

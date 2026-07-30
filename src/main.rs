@@ -5,6 +5,7 @@ mod profile;
 mod program;
 #[cfg(unix)]
 mod proxy;
+mod shell;
 mod ui;
 mod update;
 mod workspace;
@@ -20,10 +21,10 @@ use serde_json::{Value, json};
 
 use cli::{
     AutoState, Cli, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
-    IndicatorArgs, LaunchArgs, WorkspaceArgs, WorkspaceCommand,
+    IndicatorArgs, LaunchArgs, ShellInitArgs, WorkspaceArgs, WorkspaceCommand,
 };
 use launch::{AuthStatus, Tool};
-use profile::{DEFAULT_PROFILE, Profile, Store};
+use profile::{Fallback, Profile, Store};
 use workspace::{WORKSPACE_FILE, Workspaces};
 
 fn main() {
@@ -97,6 +98,7 @@ fn run(cli: Cli) -> Result<()> {
             launch_direct(&store, &workspaces, Tool::Opencode, arguments)
         }
         Some(Command::Omp(arguments)) => launch_direct(&store, &workspaces, Tool::Omp, arguments),
+        Some(Command::ShellInit(arguments)) => print_shell_init(arguments),
         Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
         Some(Command::Statusline) => indicator::render(),
         Some(Command::Update(arguments)) => update::run(arguments.check, arguments.git),
@@ -221,7 +223,7 @@ fn show_status(
     requested_profile: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let profile = resolve_profile(store, workspaces, requested_profile)?;
+    let (profile, _) = resolve_profile(store, workspaces, requested_profile)?;
     let statuses = Tool::ALL.map(|tool| (tool, launch::auth_status(tool, &profile)));
 
     report(
@@ -415,13 +417,25 @@ fn set_default_profile(
     Ok(())
 }
 
+/// Prints shell functions rather than a report, so it has no JSON form: the
+/// output is a script for a shell to read, and wrapping it in JSON would leave
+/// the caller to unwrap it before the shell could.
+fn print_shell_init(arguments: ShellInitArgs) -> Result<()> {
+    let shell = match arguments.shell {
+        Some(shell) => shell,
+        None => shell::detect()?,
+    };
+    print!("{}", shell::script(shell));
+    Ok(())
+}
+
 fn set_indicator(
     store: &Store,
     workspaces: &Workspaces,
     arguments: IndicatorArgs,
     json: bool,
 ) -> Result<()> {
-    let profile = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
+    let (profile, _) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
     let outcome = match arguments.action() {
         Some(IndicatorAction::On) => indicator::enable(&profile)?,
         Some(IndicatorAction::Off) => indicator::disable(&profile)?,
@@ -449,7 +463,7 @@ fn show_paths(
     requested_profile: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let profile = resolve_profile(store, workspaces, requested_profile)?;
+    let (profile, _) = resolve_profile(store, workspaces, requested_profile)?;
     report(
         json,
         || profile_paths(&profile),
@@ -488,20 +502,47 @@ fn launch_direct(
     tool: Tool,
     arguments: LaunchArgs,
 ) -> Result<()> {
-    let profile = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
+    let (profile, fell_back) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
     store.save_last_profile(&profile.name)?;
-    auto_bind(store, workspaces, &profile.name)?;
+
+    // The saved fallback is the one answer nothing on screen points at: the
+    // command did not name it and the directory does not either, which is how a
+    // launch ends up in the wrong profile with nothing having said so. Saying it
+    // before the tool takes the terminal is the last chance to notice. Reporting
+    // commands stay quiet, since a fallback is their ordinary case and they are
+    // run in loops.
+    if let Some(fallback) = &fell_back {
+        eprintln!(
+            "ditto-cli: using '{}'; nothing binds this directory, and it is {}",
+            profile.name,
+            fallback.describe()
+        );
+    }
+
+    let bound = auto_bind(store, workspaces, &profile.name)?;
+    if fell_back.is_some() && !bound {
+        eprintln!(
+            "ditto-cli: bind this directory with `ditto-cli workspace use <profile>`, or name a \
+             profile with `ditto-cli {} <profile>`",
+            tool.key()
+        );
+    }
+
     launch::launch(tool, &profile, &arguments.args)
 }
 
 /// An explicit name always wins. Without one the directory decides, then the
 /// saved fallback, and with nothing saved this is the user's existing CLI
 /// configuration.
+///
+/// The second half of the answer is the saved value that chose the profile, and
+/// only when neither the command nor the directory did. Callers that hand the
+/// terminal to a tool report it; the rest have no reason to.
 fn resolve_profile(
     store: &Store,
     workspaces: &Workspaces,
     requested_profile: Option<&str>,
-) -> Result<Profile> {
+) -> Result<(Profile, Option<Fallback>)> {
     let binding = current_binding(workspaces);
 
     if let Some(name) = requested_profile {
@@ -519,12 +560,12 @@ fn resolve_profile(
                 );
             }
         }
-        return Ok(profile);
+        return Ok((profile, None));
     }
 
     if let Some(binding) = binding {
         match store.load_profile(&binding.profile) {
-            Ok(profile) => return Ok(profile),
+            Ok(profile) => return Ok((profile, None)),
             // A binding outlives the profile it names as soon as that profile
             // is deleted. Saying so and falling through beats refusing to
             // launch anything from the directory until the file is repaired.
@@ -536,10 +577,9 @@ fn resolve_profile(
         }
     }
 
-    let name = store
-        .fallback_profile_name()?
-        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned());
-    store.load_profile(&name)
+    let fallback = store.fallback_profile()?;
+    let profile = store.load_profile(fallback.name())?;
+    Ok((profile, Some(fallback)))
 }
 
 /// The profile a command naming none would use here: the directory's binding
@@ -555,9 +595,7 @@ fn effective_fallback(store: &Store, binding: Option<&workspace::Binding>) -> Re
             return Ok(binding.profile.clone());
         }
     }
-    Ok(store
-        .fallback_profile_name()?
-        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()))
+    Ok(store.fallback_profile()?.name().to_owned())
 }
 
 /// The binding covering the current directory. A directory that cannot be read
@@ -577,24 +615,32 @@ fn current_binding(workspaces: &Workspaces) -> Option<workspace::Binding> {
 /// needs no name. A directory already answered for by itself or an ancestor is
 /// left alone, which is what keeps every subdirectory of a bound project from
 /// collecting a file of its own.
-fn auto_bind(store: &Store, workspaces: &Workspaces, profile: &str) -> Result<()> {
+///
+/// Answers whether the directory came out of this bound, so a caller does not
+/// have to work out for itself which of the reasons for declining applied.
+fn auto_bind(store: &Store, workspaces: &Workspaces, profile: &str) -> Result<bool> {
     if !store.workspace_auto_bind()? {
-        return Ok(());
+        return Ok(false);
     }
     let Ok(directory) = current_directory() else {
-        return Ok(());
+        return Ok(false);
     };
     if !workspaces.may_auto_bind(&directory) || workspaces.find(&directory)?.is_some() {
-        return Ok(());
+        return Ok(false);
     }
 
     match workspaces.bind_file(&directory, profile) {
-        Ok(path) => println!("Bound this directory to '{profile}' ({}).", path.display()),
+        Ok(path) => {
+            println!("Bound this directory to '{profile}' ({}).", path.display());
+            Ok(true)
+        }
         // A directory there is no permission to write in is not a reason to
         // refuse the launch that was actually asked for.
-        Err(error) => eprintln!("ditto-cli: could not bind this directory: {error:#}"),
+        Err(error) => {
+            eprintln!("ditto-cli: could not bind this directory: {error:#}");
+            Ok(false)
+        }
     }
-    Ok(())
 }
 
 fn run_workspace(

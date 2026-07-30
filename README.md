@@ -183,6 +183,9 @@ ditto-cli workspace clear
 ditto-cli workspace list
 ditto-cli workspace auto off
 
+# Put Ditto in front of the tools' own names
+eval "$(ditto-cli shell-init zsh)"   # bash, fish, zsh; reads SHELL when omitted
+
 # The profile used when a command names none and no directory is bound
 ditto-cli default             # report it
 ditto-cli default client-a    # pin it
@@ -273,6 +276,17 @@ ditto-cli: using 'work' for this run; ~/code/client-a/.ditto.toml still names 'c
 
 The binding is untouched. Use `ditto-cli workspace use work` to change it for good.
 
+Where no directory answers, the launch says which profile it fell back to and why, since nothing in the command or the directory pointed at it:
+
+```console
+$ cd ~/scratch
+$ ditto-cli omp
+ditto-cli: using 'work'; nothing binds this directory, and it is pinned as the default
+Bound this directory to 'work' (~/scratch/.ditto.toml).
+```
+
+Reporting commands stay quiet about it: for them a fallback is the ordinary case, and they are run in loops.
+
 ### Directories you cannot leave a file in
 
 For a repository that is not yours to add a file to, record the binding in Ditto's own registry instead:
@@ -295,6 +309,40 @@ Removed ~/code/client-a/crates/core/.ditto.toml.
 
 Clearing touches only the directory you name, never its ancestors, and reports what the directory falls back to.
 
+## Shell integration
+
+A binding decides something only for a launch that goes through Ditto. Typing the tool's own name runs the tool, which has never heard of `.ditto.toml`:
+
+```console
+$ cd ~/code/client-a   # bound to client-a
+$ omp                  # OMP's own default profile, not client-a
+```
+
+Nothing Ditto does at launch time can catch that, because Ditto is not in the process. The shell is the only place the bare name can be intercepted, so Ditto writes the functions that do it:
+
+```bash
+# ~/.zshrc
+eval "$(ditto-cli shell-init zsh)"
+```
+
+`bash`, `fish`, and `zsh` are all written for, and `ditto-cli shell-init` with no shell named reads `SHELL`. Fish loads it by piping into `source`:
+
+```fish
+# ~/.config/fish/config.fish
+ditto-cli shell-init fish | source
+```
+
+From then on the tool's own name uses the directory's profile, and arguments pass straight through to the tool:
+
+```console
+$ cd ~/code/client-a
+$ omp --model opus     # the same as: ditto-cli omp -- --model opus
+```
+
+Two ways back out, both printed in the script itself: `command omp` runs OMP with Ditto out of the way, and `ditto-cli omp <profile>` launches another profile for that one run.
+
+A function named after a tool cannot loop back into itself. Ditto starts a tool through `execvp`, which searches `PATH` and never looks at shell functions. And if `ditto-cli` cannot be found at all, each function falls through to the tool, so a half-finished update cannot take `claude` with it.
+
 ## Scripting and agents
 
 Add `--json` to any reporting command and it prints one JSON object on stdout. The flag is global, so it reads correctly on either side of the subcommand:
@@ -315,7 +363,7 @@ ditto-cli --json status client-a
 }
 ```
 
-`list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, `workspace`, and `indicator` all answer in JSON. Errors become `{"error": "..."}` on stderr, and every failure exits 1.
+`list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, `workspace`, and `indicator` all answer in JSON. Errors become `{"error": "..."}` on stderr, and every failure exits 1. `shell-init` prints a script for a shell to read rather than a report, so `--json` has nothing to do there.
 
 Running `ditto-cli` with no subcommand opens the picker, which needs an interactive terminal. Without one it exits 1 and names the commands to use instead, rather than failing on a terminal that was never there.
 

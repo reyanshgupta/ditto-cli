@@ -62,6 +62,8 @@ pub enum Command {
     Opencode(LaunchArgs),
     /// Launch Oh My Pi.
     Omp(LaunchArgs),
+    /// Print shell functions that route the tools' own names through Ditto.
+    ShellInit(ShellInitArgs),
     /// Show or change the profile indicator Claude Code displays.
     Indicator(IndicatorArgs),
     /// Print the profile status line. Claude Code runs this itself.
@@ -116,6 +118,19 @@ impl AutoState {
     pub fn enabled(self) -> bool {
         matches!(self, Self::On)
     }
+}
+
+#[derive(Debug, Args)]
+pub struct ShellInitArgs {
+    /// Shell to write for. Read from `SHELL` when omitted.
+    pub shell: Option<ShellKind>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ShellKind {
+    Bash,
+    Fish,
+    Zsh,
 }
 
 #[derive(Debug, Args)]
@@ -290,6 +305,49 @@ mod tests {
                 if profile.as_deref() == Some("work")
                     && args == [OsString::from("--model"), OsString::from("opus")]
         ));
+    }
+
+    #[test]
+    fn parses_a_launch_with_nothing_after_the_separator() {
+        // The shape the generated shell functions always send: no profile, and a
+        // `--` with however many arguments the user typed behind it, including
+        // none. Reading the `--` as a profile name would launch a profile called
+        // `--` and fail on a name nobody typed.
+        let cli = Cli::try_parse_from(["ditto-cli", "omp", "--"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Omp(LaunchArgs { profile, args })) if profile.is_none() && args.is_empty()
+        ));
+
+        let with_arguments =
+            Cli::try_parse_from(["ditto-cli", "omp", "--", "--model", "opus"]).unwrap();
+        assert!(matches!(
+            with_arguments.command,
+            Some(Command::Omp(LaunchArgs { profile, args }))
+                if profile.is_none()
+                    && args == [OsString::from("--model"), OsString::from("opus")]
+        ));
+    }
+
+    #[test]
+    fn parses_shell_init_commands() {
+        let named = Cli::try_parse_from(["ditto-cli", "shell-init", "fish"]).unwrap();
+        assert!(matches!(
+            named.command,
+            Some(Command::ShellInit(ShellInitArgs { shell })) if shell == Some(ShellKind::Fish)
+        ));
+
+        // No shell means the environment is asked, which is the form the
+        // documented one-liner uses.
+        let detected = Cli::try_parse_from(["ditto-cli", "shell-init"]).unwrap();
+        assert!(matches!(
+            detected.command,
+            Some(Command::ShellInit(ShellInitArgs { shell })) if shell.is_none()
+        ));
+
+        // A shell Ditto cannot write for is refused at parse time, so nothing
+        // ever prints syntax the shell reading it could not parse.
+        assert!(Cli::try_parse_from(["ditto-cli", "shell-init", "pwsh"]).is_err());
     }
 
     fn indicator_args(arguments: &[&str]) -> IndicatorArgs {

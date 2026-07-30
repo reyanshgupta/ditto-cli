@@ -6,7 +6,7 @@
 
 Keep work, personal, and client Claude Code, Codex, opencode, and OMP logins apart.
 
-Ditto CLI gives each profile its own authentication, settings, and session history. Pick a profile in the terminal, then launch Claude Code, Codex, opencode, or OMP. Your existing setup stays available as the `default` profile.
+Ditto CLI gives each profile its own authentication, settings, and session history. Pick a profile in the terminal, then launch any of the four tools. Your existing setup stays available as the `default` profile.
 
 Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, whichever coding identity you need.
 
@@ -38,11 +38,11 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Why use it?
+## How it works
 
 Claude Code, Codex, opencode, and OMP keep user-level configuration and login state on disk. That works until you need separate accounts for different jobs. Manually moving auth files around is easy to get wrong, and it is hard to tell which account a new session will use.
 
-Ditto CLI launches each tool with the selected profile:
+Instead, Ditto CLI launches each tool pointed at the selected profile:
 
 | Tool | Setting used by Ditto CLI |
 | --- | --- |
@@ -51,47 +51,20 @@ Ditto CLI launches each tool with the selected profile:
 | opencode | `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` under `~/.ditto/profiles/<name>/opencode` |
 | OMP | `omp --profile <name>` and `OMP_PROFILE=<name>` |
 
-opencode has no single home variable; it resolves its directories the XDG way, so Ditto CLI pins the three bases that hold credentials, configuration, and session state. `XDG_CACHE_HOME` is deliberately left alone so profiles keep sharing opencode's downloaded tooling.
+opencode has no single home variable; it resolves its directories the XDG way, so Ditto CLI pins the three bases that hold credentials, configuration, and session state. `XDG_CACHE_HOME` is deliberately left alone so profiles keep sharing opencode's downloaded tooling. Those variables are set for the launched process and anything it starts, including commands opencode's own tools run.
 
-No config files are swapped. Profiles remain independent, and switching only affects the process launched by Ditto CLI.
-
-## Requirements
-
-Install at least one of the supported CLIs:
-
-- [Claude Code](https://code.claude.com/docs/en/setup)
-- [OpenAI Codex CLI](https://github.com/openai/codex)
-- [opencode](https://opencode.ai/docs/)
-- [Oh My Pi](https://github.com/can1357/oh-my-pi)
-
-Building Ditto CLI requires Rust 1.85 or newer.
-
-## Platform support
-
-Ditto CLI runs on macOS, Linux, and Windows. Profiles, launching, sign-in status, the Claude Code status line, and every command below work the same on all three.
-
-Two things differ on Windows:
-
-- **Window titles.** Naming the profile in the title means sitting between the tool and the terminal, which needs a pseudoterminal; Ditto CLI opens one on macOS and Linux only. On Windows the title is set once before the tool starts, and the tool then paints over it with its own. Claude Code's status line is unaffected, and is the better indicator anyway.
-- **Directory permissions.** Profile directories are created owner-only on macOS and Linux. Windows has no equivalent mode to set, so profiles rely on the access control your user directory already carries. That is enough under `%USERPROFILE%`; if you point `DITTO_HOME` somewhere else, put it somewhere private.
-
-On Windows the CLIs are usually installed by npm, which writes `claude.cmd` rather than `claude.exe`. Windows itself only ever looks for `.exe`, so Ditto CLI searches `PATH` the way a command prompt does, honouring `PATHEXT`. A native `claude.exe` is preferred when both are present.
+No config files are swapped. Profiles remain independent, and switching only affects the process Ditto CLI launched.
 
 ## Install
 
-From crates.io:
+Ditto CLI needs Rust 1.85 or newer to build, and at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), or [Oh My Pi](https://github.com/can1357/oh-my-pi).
 
 ```bash
-cargo install ditto-cli
+cargo install ditto-cli                                          # from crates.io
+cargo install --git https://github.com/reyanshgupta/ditto-cli    # from the latest source
 ```
 
-From the latest GitHub source:
-
-```bash
-cargo install --git https://github.com/reyanshgupta/ditto-cli
-```
-
-From a local checkout:
+Or from a local checkout:
 
 ```bash
 git clone https://github.com/reyanshgupta/ditto-cli.git
@@ -99,7 +72,7 @@ cd ditto-cli
 cargo install --path .
 ```
 
-Make sure Cargo's binary directory is in your `PATH`:
+Make sure Cargo's binary directory is on your `PATH`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -107,9 +80,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 On Windows, `cargo install` already writes into `%USERPROFILE%\.cargo\bin`, which rustup puts on your `PATH`.
 
-Ditto CLI installs as `ditto-cli`. macOS already uses `ditto` for its built-in file-copy utility at `/usr/bin/ditto`.
+Ditto CLI installs as `ditto-cli`, not `ditto`: macOS already uses that name for its built-in file-copy utility at `/usr/bin/ditto`.
 
-## Update
+macOS, Linux, and Windows are all supported, and every command below behaves the same on each. Two smaller things differ on Windows — see [Windows notes](#windows-notes).
+
+### Update
 
 ```bash
 ditto-cli update           # install the newest crates.io release
@@ -117,7 +92,7 @@ ditto-cli update --check   # compare versions without installing
 ditto-cli update --git     # install from the Git repository instead
 ```
 
-`update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release, and asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
+`update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release. Asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
 
 If you are running a binary from the [releases page](https://github.com/reyanshgupta/ditto-cli/releases) rather than a `cargo install` copy, `update` says so before it starts: cargo writes into its own bin directory and leaves the downloaded binary untouched. Replace that file yourself, or download the newer archive.
 
@@ -151,21 +126,19 @@ Each tool keeps its own credentials. Signing in to one does not copy credentials
 | `L` | Sign out, with confirmation |
 | `n` | Create a profile |
 | `e` | Rename the selected profile |
-| `d` | Make the selected profile the default, or unset it |
+| `d` | Mark the selected profile `★` as the default, or unset it |
 | `r` | Refresh sign-in status |
 | `q`, `Esc`, or `Ctrl+C` | Quit or close a dialog |
 
 Sign-in status is checked in the background, so the list stays responsive while each CLI is asked. A spinner marks the tools still being checked.
 
-The selected profile is remembered for the next run.
-
-Pressing `d` marks the selected profile with a `★` and makes it the profile every command uses when you leave the name out. Pressing `d` on it again removes the mark. Unlike the remembered selection, the default stays put: running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one.
+The selected profile is remembered for the next run. The `★` default is separate and stays put: it is the profile every command uses when you leave the name out, and running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one. See [which profile a command uses](#which-profile-a-command-uses).
 
 Renaming keeps the profile's settings, session history, and its Codex and opencode logins. Claude Code is the exception, and the rename dialog says so before you commit to it: see [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). The built-in `default` profile cannot be renamed.
 
 ## Command-line usage
 
-The TUI is optional. Every launch command works directly from the shell:
+The TUI is optional. Everything it does works directly from the shell:
 
 ```bash
 # Profiles
@@ -173,8 +146,20 @@ ditto-cli create work
 ditto-cli rename work client-a
 ditto-cli delete work --yes   # removes credentials and sessions for good
 ditto-cli list
-ditto-cli status client-a   # sign-in state for all four tools
+ditto-cli status client-a     # sign-in state for all four tools
 ditto-cli paths client-a
+
+# Launch a tool, with short aliases for the first three
+ditto-cli claude client-a     # or: cc
+ditto-cli codex client-a      # or: cx
+ditto-cli opencode client-a   # or: oc
+ditto-cli omp client-a
+
+# Pass arguments to the underlying CLI after --
+ditto-cli claude client-a -- --model opus
+ditto-cli codex client-a -- --search
+ditto-cli opencode client-a -- --model anthropic/claude-opus-5
+ditto-cli omp client-a -- --model opus
 
 # Bind a directory to a profile
 ditto-cli workspace                  # what this directory launches with
@@ -191,45 +176,34 @@ ditto-cli default             # report it
 ditto-cli default client-a    # pin it
 ditto-cli default --clear     # release it
 
-# Which profile am I in?
+# Show the profile inside Claude Code
 ditto-cli indicator client-a         # report the status line setting
-ditto-cli indicator client-a --on    # show the profile inside Claude Code
+ditto-cli indicator client-a --on
 ditto-cli indicator client-a --off
-
-# Ditto CLI itself
-ditto-cli update --check
-
-# Launch a tool
-ditto-cli claude client-a
-ditto-cli codex client-a
-ditto-cli opencode client-a
-ditto-cli omp client-a
-
-# Short aliases
-ditto-cli cc client-a       # Claude Code
-ditto-cli cx client-a       # Codex
-ditto-cli oc client-a       # opencode
-
-# Pass arguments to the underlying CLI after --
-ditto-cli claude client-a -- --model opus
-ditto-cli codex client-a -- --search
-ditto-cli opencode client-a -- --model anthropic/claude-opus-5
-ditto-cli omp client-a -- --model opus
 ```
 
-If the profile name is omitted, Ditto CLI asks the directory first (see [Workspaces](#workspaces)). Failing that it uses the profile marked as the default, either with `d` in the TUI or with `ditto-cli default <profile>`, then the last selected profile, and before the first selection `default`. `ditto-cli list` marks the last selection with `*` and the default with a trailing `default`.
-
-Deleting is the one command that destroys something, so it asks to be meant. Without `--yes` it lists the directories it would remove and stops. The built-in `default` profile cannot be deleted; it is your own configuration, which Ditto CLI never created.
-
-Profile names use lowercase letters, numbers, `.`, `-` and `_`, start with a letter or number, and are at most 32 characters. Uppercase names are rejected because OMP accepts only lowercase profile names.
-
-You can also call the native authentication commands through a profile:
+The native authentication commands can be called through a profile too:
 
 ```bash
 ditto-cli claude client-a -- auth login
 ditto-cli codex client-a -- login
 ditto-cli opencode client-a -- auth login
 ```
+
+Deleting is the one command that destroys something, so it asks to be meant. Without `--yes` it lists the directories it would remove and stops. The built-in `default` profile cannot be deleted; it is your own configuration, which Ditto CLI never created.
+
+Profile names use lowercase letters, numbers, `.`, `-` and `_`, start with a letter or number, and are at most 32 characters. Uppercase names are rejected because OMP accepts only lowercase profile names.
+
+### Which profile a command uses
+
+When the profile name is omitted, Ditto CLI takes the first answer it finds:
+
+1. The directory's binding (see [Workspaces](#workspaces)).
+2. The profile pinned as the default, with `d` in the TUI or `ditto-cli default <profile>`.
+3. The last profile selected in the TUI.
+4. Failing all of those, and before your first selection, `default`.
+
+`ditto-cli list` marks the last selection with `*` and the default with a trailing `default`.
 
 ## Workspaces
 
@@ -343,6 +317,32 @@ Two ways back out, both printed in the script itself: `command omp` runs OMP wit
 
 A function named after a tool cannot loop back into itself. Ditto starts a tool through `execvp`, which searches `PATH` and never looks at shell functions. And if `ditto-cli` cannot be found at all, each function falls through to the tool, so a half-finished update cannot take `claude` with it.
 
+## Knowing which profile you are in
+
+Once a tool has taken over the terminal, nothing on screen says which profile it is running as. Ditto CLI answers that in the window title for every tool, and inside Claude Code's own interface as well.
+
+Claude Code gets a status line along the bottom of its interface:
+
+```text
+⬖ client-a · you@example.com
+```
+
+Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so: Claude Code renders only one, and replacing yours would quietly take it away. Nothing else in `settings.json` is touched.
+
+The status line reads `DITTO_PROFILE`, so a `claude` you started yourself still reports the right profile as long as `CLAUDE_CONFIG_DIR` points at one.
+
+Every tool also names the profile in the window and tab title:
+
+```text
+ditto:client-a — Codex — my-repo
+```
+
+All four tools write their own titles and keep updating them as you work, so a title set once before handing over is overwritten within moments. Instead, Ditto CLI runs the tool in a pseudoterminal and rewrites the title sequences on their way to the terminal, adding `ditto:<profile>` in front of whatever the tool called itself. You keep the tool's own title and gain the profile.
+
+Everything else is forwarded byte for byte. Colours, hyperlinks, clipboard writes, mouse reporting, and anything the tool draws are untouched, and the tool still gets a real terminal, the right window size, and your keystrokes as it always did. Ditto CLI exits with the tool's own exit status.
+
+To turn it off, set `DITTO_NO_PROXY=1` and Ditto CLI hands the terminal straight to the tool as it used to. The title stops naming the profile, and the Claude Code status line still works. Ditto CLI also steps aside on its own when output is redirected, or if the pseudoterminal cannot be opened. The pseudoterminal is a macOS and Linux feature; see [Windows notes](#windows-notes).
+
 ## Scripting and agents
 
 Add `--json` to any reporting command and it prints one JSON object on stdout. The flag is global, so it reads correctly on either side of the subcommand:
@@ -368,65 +368,22 @@ ditto-cli --json status client-a
 Running `ditto-cli` with no subcommand opens the picker, which needs an interactive terminal. Without one it exits 1 and names the commands to use instead, rather than failing on a terminal that was never there.
 
 ```bash
-# Which profiles exist, and which would a bare command use?
-ditto-cli list --json | jq '{fallback: .fallback_profile, names: [.profiles[].name]}'
-
 # Any tool needing a sign-in?
 ditto-cli status client-a --json | jq -r '.tools[] | select(.signed_in | not) | .tool'
-
-# Where does this profile keep Claude Code's settings?
-ditto-cli paths client-a --json | jq -r .claude
 ```
 
-The `tool`, `status`, and `indicator` outcome strings are stable identifiers meant to be matched on; the `label` beside them is display text and may be reworded. [AGENTS.md](AGENTS.md) documents the full contract, along with how to edit Ditto CLI itself.
+The `tool`, `status`, and `indicator` outcome strings are stable identifiers meant to be matched on; the `label` beside them is display text and may be reworded. [AGENTS.md](AGENTS.md) documents the full contract and has more recipes, along with how to edit Ditto CLI itself.
 
-## Knowing which profile you are in
+## Where credentials and files are stored
 
-Once a tool has taken over the terminal, nothing on screen says which profile it is running as. Ditto CLI answers that in the title for every tool, and inside Claude Code's own interface as well.
+Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs, and OMP authentication through `/login` inside OMP. Each tool stores the result wherever it normally would, under the directory Ditto CLI pointed it at:
 
-Claude Code gets a status line along the bottom of its interface:
+- **Claude Code** uses the selected `CLAUDE_CONFIG_DIR`. On macOS the credentials themselves stay in the system Keychain, keyed to that directory's path, which is what keeps two profiles from sharing one login — and why [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out).
+- **Codex** keeps its auth state under the selected `CODEX_HOME`.
+- **opencode** writes `auth.json` into the selected data directory.
+- **OMP** keeps auth, settings, sessions, and caches under `~/.omp/profiles/<name>/agent`.
 
-```text
-⬖ client-a · you@example.com
-```
-
-Launching Claude Code through Ditto CLI installs it, and `ditto-cli indicator` turns it on or off by hand. If the profile already has a `statusLine` of its own, Ditto CLI leaves it alone and says so: Claude Code renders only one, and replacing yours would quietly take it away. Nothing else in `settings.json` is touched.
-
-The status line reads `DITTO_PROFILE`, so a `claude` you started yourself still reports the right profile as long as `CLAUDE_CONFIG_DIR` points at one.
-
-Every tool also names the profile in the window and tab title:
-
-```text
-ditto:client-a — Codex — my-repo
-```
-
-All four tools write their own titles and keep updating them as you work, so a title set once before handing over is overwritten within moments. Instead, Ditto CLI runs the tool in a pseudoterminal and rewrites the title sequences on their way to the terminal, adding `ditto:<profile>` in front of whatever the tool called itself. You keep the tool's own title and gain the profile.
-
-Everything else is forwarded byte for byte. Colours, hyperlinks, clipboard writes, mouse reporting, and anything the tool draws are untouched, and the tool still gets a real terminal, the right window size, and your keystrokes as it always did. Ditto CLI exits with the tool's own exit status.
-
-To turn it off, set `DITTO_NO_PROXY=1` and Ditto CLI hands the terminal straight to the tool as it used to. The title stops naming the profile, and the Claude Code status line still works. Ditto CLI also steps aside on its own when output is redirected, or if the pseudoterminal cannot be opened.
-
-This is a macOS and Linux feature. On Windows the title is written once before the tool starts and the tool overwrites it; Ditto CLI still waits on the tool and exits with its status, and Ctrl-C goes to the tool rather than ending Ditto CLI out from under it.
-
-## Renaming a profile signs Claude Code out
-
-Claude Code stores credentials against the configuration directory it was pointed at, so moving that directory loses the sign-in. Renaming a profile moves `~/.ditto/profiles/<name>/claude`, and the credentials do not follow it.
-
-Ditto CLI warns before the rename and tells you how to get back in:
-
-```bash
-ditto-cli claude client-a -- auth login
-```
-
-Codex and opencode keep their credentials in files inside the profile, so they survive a rename untouched.
-
-## Where credentials are stored
-
-Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs. OMP authentication runs through `/login` inside OMP.
-
-Codex keeps its auth state under the selected `CODEX_HOME`. Claude Code uses the selected `CLAUDE_CONFIG_DIR`; on macOS the credentials themselves stay in the system Keychain, keyed to that directory's path, which is what keeps two profiles from sharing one login — and why [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). opencode writes `auth.json` into the selected data directory. OMP keeps auth, settings, sessions, and caches under `~/.omp/profiles/<name>/agent`.
-
-Ditto CLI's files are laid out like this:
+Ditto CLI's own files are laid out like this:
 
 ```text
 ~/.ditto/
@@ -446,15 +403,9 @@ Ditto CLI's files are laid out like this:
         └── opencode/
 ```
 
-The nested `opencode/` directory is opencode's own doing: it appends its name to every XDG base it is given.
+The nested `opencode/` directory is opencode's own doing: it appends its name to every XDG base it is given. OMP profiles are the one thing kept outside this tree, since OMP manages its own profile directory.
 
-OMP profiles remain in OMP's native profile directory:
-
-```text
-~/.omp/profiles/<name>/agent/
-```
-
-Directories are created with user-only permissions on macOS and Linux. Windows has no equivalent mode, so they inherit the access control of the directory they are created in, which under `%USERPROFILE%` is already restricted to you.
+Directories are created with user-only permissions on macOS and Linux; see [Windows notes](#windows-notes) for the difference there.
 
 The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.local/share/opencode` and `~/.config/opencode` (or wherever your `XDG_*` variables already send them), and OMP's native `~/.omp/agent` profile. It exposes your existing setup without copying or migrating anything. For opencode the `default` profile resolves the same XDG bases opencode would pick on its own, so pointing at it changes nothing.
 
@@ -479,7 +430,25 @@ DITTO_HOME="$HOME/.config/ditto" ditto-cli
 
 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, and `OPENCODE_API_KEY` are inherited by launched tools. They may override a saved subscription login, so Ditto CLI shows a warning when one is set.
 
-Launching opencode sets `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` for that process and anything it starts, including commands opencode's own tools run.
+## Renaming a profile signs Claude Code out
+
+Claude Code stores credentials against the configuration directory it was pointed at, so moving that directory loses the sign-in. Renaming a profile moves `~/.ditto/profiles/<name>/claude`, and the credentials do not follow it.
+
+Ditto CLI warns before the rename and tells you how to get back in:
+
+```bash
+ditto-cli claude client-a -- auth login
+```
+
+Codex and opencode keep their credentials in files inside the profile, so they survive a rename untouched.
+
+## Windows notes
+
+Profiles, launching, sign-in status, the Claude Code status line, and every command above work the same as they do elsewhere. Three things are worth knowing:
+
+- **Window titles.** Naming the profile in the title means sitting between the tool and the terminal, which needs a pseudoterminal; Ditto CLI opens one on macOS and Linux only. On Windows the title is set once before the tool starts, and the tool then paints over it with its own. Claude Code's status line is unaffected, and is the better indicator anyway. Ditto CLI still waits on the tool and exits with its status, and Ctrl-C goes to the tool rather than ending Ditto CLI out from under it.
+- **Directory permissions.** Profile directories are created owner-only on macOS and Linux. Windows has no equivalent mode to set, so profiles inherit the access control of the directory they are created in. That is enough under `%USERPROFILE%`; if you point `DITTO_HOME` somewhere else, put it somewhere private.
+- **Finding the CLIs.** On Windows they are usually installed by npm, which writes `claude.cmd` rather than `claude.exe`. Windows itself only ever looks for `.exe`, so Ditto CLI searches `PATH` the way a command prompt does, honouring `PATHEXT`. A native `claude.exe` is preferred when both are present.
 
 ## Remove Ditto CLI
 

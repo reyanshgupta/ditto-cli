@@ -383,6 +383,18 @@ Everything else is forwarded byte for byte. Colours, hyperlinks, clipboard write
 
 To turn it off, set `DITTO_NO_PROXY=1` and Ditto CLI hands the terminal straight to the tool as it used to. The title stops naming the profile, and the Claude Code status line still works. Ditto CLI also steps aside on its own when output is redirected, or if the pseudoterminal cannot be opened. The pseudoterminal is a macOS and Linux feature; see [Windows notes](#windows-notes).
 
+### Under herdr
+
+[herdr](https://herdr.dev) works out which agent is in a pane, and what that agent is doing, by reading the pane's foreground process and the title the tool writes. Sitting between the tool and the terminal costs it both answers: the foreground process becomes `ditto-cli` while the tool moves to a pseudoterminal of its own, and a title with `ditto:<profile>` in front of it no longer matches the rules herdr reads state from. The pane stops listing an agent, and `herdr agent` stops seeing it.
+
+So Ditto CLI steps aside on its own inside a herdr pane, exactly as `DITTO_NO_PROXY=1` does, and reports the profile to herdr instead:
+
+```text
+herdr pane report-metadata <pane> --source ditto --token profile=<profile>
+```
+
+herdr shows it as a pane token, and detection, agent state, and the Claude Code status line all keep working. Nothing needs configuring — it keys off `HERDR_PANE_ID`, which herdr sets in every pane it opens. If herdr is not running or its CLI is not on `PATH` the report is skipped and the launch carries on.
+
 ## Scripting and agents
 
 Add `--json` to any reporting command and it prints one JSON object on stdout. The flag is global, so it reads correctly on either side of the subcommand:
@@ -497,6 +509,7 @@ The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.loca
 | `DITTO_OMP_BIN` | Override the `omp` executable |
 | `DITTO_PROFILE` | Selected profile name exported to every launched tool, and what Claude Code's status line reports |
 | `DITTO_NO_PROXY` | Hand the terminal straight to the tool, leaving the title to it (macOS and Linux) |
+| `HERDR_PANE_ID` | Read, not set: herdr names the pane it opened, and Ditto CLI steps aside and reports the profile to herdr. See [Under herdr](#under-herdr) |
 | `NO_COLOR` | Draw the Claude Code status line without colour |
 
 Example:

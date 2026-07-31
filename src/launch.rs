@@ -325,17 +325,24 @@ fn show_profile(tool: Tool, profile: &Profile) {
     if tool == Tool::Claude {
         indicator::enable_quietly(profile);
     }
+    crate::herdr::report_profile(profile);
     indicator::announce(tool, profile);
 }
 
 /// Whether the tool should run underneath Ditto rather than replace it.
 /// Rewriting the title only means anything on a real terminal, so redirected
 /// output is handed over untouched.
+///
+/// herdr is the other way out. It reads both the foreground process and the
+/// title to work out which agent is in a pane and what it is doing, and a
+/// proxy costs it both answers, so under herdr the title is not Ditto's to
+/// take. `herdr::report_profile` says the same thing where herdr will show it.
 #[cfg(unix)]
 fn proxy_wanted() -> bool {
     use std::io::IsTerminal;
 
     std::env::var_os(NO_PROXY_VARIABLE).is_none()
+        && crate::herdr::pane().is_none()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
 }
@@ -433,6 +440,7 @@ pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
         }
     }
 
+    crate::herdr::report_profile(profile);
     indicator::announce(tool, profile);
     let error = build_command(tool, profile, args).exec();
     Err(cannot_launch(tool, error))

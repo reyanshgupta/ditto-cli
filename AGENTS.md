@@ -110,6 +110,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — and the linking itself. |
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
+| `herdr.rs` | Reading `HERDR_PANE_ID`, and reporting the profile to herdr as pane metadata. Why the proxy is skipped inside a herdr pane. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
 | `shell.rs` | The `shell-init` functions that route a tool's own name through Ditto, and reading `SHELL` to pick a dialect. |
 | `update.rs` | `ditto-cli update`, which shells out to `cargo install`. |

@@ -1,4 +1,5 @@
 mod cli;
+mod herdr;
 mod indicator;
 mod launch;
 mod profile;

@@ -401,7 +401,11 @@ jobs:
               echo "${name}@${CRATE_VERSION} is already published"
               return 0
             fi
-            npm publish "${directory}" --access public --provenance
+            # The `./` is load-bearing. npm reads a bare `a/b` as the GitHub
+            # shorthand for a repository, so without it npm goes looking for
+            # github.com/npm-dist/ditto-cli-darwin-arm64 over SSH rather than
+            # publishing the directory sitting right there.
+            npm publish "./${directory}" --access public --provenance
           }
 
           publish ditto-cli-darwin-arm64

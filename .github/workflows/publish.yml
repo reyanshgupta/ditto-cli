@@ -240,10 +240,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out release tag
+      # Deliberately checks out the ref the workflow is running from rather
+      # than the release tag. The formula is rendered from a version number and
+      # the checksums that release published, so it needs nothing from the
+      # tag's own tree; pinning to the tag only means a tag cut before this
+      # tooling existed, or before a fix to it, can never be rendered at all.
+      - name: Check out the release tooling
         uses: actions/checkout@v7
-        with:
-          ref: ${{ env.RELEASE_TAG }}
 
       # The tap is a second repository, and GITHUB_TOKEN cannot push to it. A
       # release should not fail over an optional distribution channel, so a
@@ -285,7 +288,11 @@ jobs:
         env:
           CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
         run: |
-          if git diff --quiet -- Formula/ditto-cli.rb; then
+          # `git diff` sees nothing in a file Git is not yet tracking, so a tap
+          # that has never carried the formula would call itself up to date and
+          # push nothing. `status --porcelain` reports the untracked file too,
+          # and stays empty only when the formula really is unchanged.
+          if [[ -z "$(git status --porcelain -- Formula/ditto-cli.rb)" ]]; then
             echo "Formula is already at ${CRATE_VERSION}"
             exit 0
           fi

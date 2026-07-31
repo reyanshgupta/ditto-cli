@@ -1,6 +1,7 @@
 # Ditto CLI
 
 [![crates.io](https://img.shields.io/crates/v/ditto-cli.svg)](https://crates.io/crates/ditto-cli)
+[![npm](https://img.shields.io/npm/v/@reyanshgupta/ditto-cli.svg)](https://www.npmjs.com/package/@reyanshgupta/ditto-cli)
 [![MIT license](https://img.shields.io/badge/license-MIT-6f42c1.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-6f42c1.svg)](https://www.rust-lang.org/)
 
@@ -65,12 +66,23 @@ On macOS and Linux, Homebrew installs the prebuilt binary for your platform, so 
 brew install reyanshgupta/tap/ditto-cli
 ```
 
+npm carries the same prebuilt binaries, on macOS, Linux, and Windows alike. If you installed Claude Code or Codex with npm, it is already here:
+
+```bash
+npm install -g @reyanshgupta/ditto-cli
+npx @reyanshgupta/ditto-cli list        # or try it without installing
+```
+
+The npm package is scoped because plain `ditto-cli` on npm belongs to an unrelated project. The command it installs is still `ditto-cli`.
+
 Cargo builds from source instead, and needs Rust 1.85 or newer:
 
 ```bash
 cargo install ditto-cli                                          # from crates.io
 cargo install --git https://github.com/reyanshgupta/ditto-cli    # from the latest source
 ```
+
+`cargo binstall ditto-cli` takes the released binary instead of compiling one, which is a good deal quicker: a source build compiles a bundled SQLite before it links anything.
 
 Or from a local checkout:
 
@@ -86,7 +98,7 @@ After a Cargo install, make sure Cargo's binary directory is on your `PATH`:
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-On Windows, `cargo install` already writes into `%USERPROFILE%\.cargo\bin`, which rustup puts on your `PATH`.
+On Windows, `cargo install` already writes into `%USERPROFILE%\.cargo\bin`, which rustup puts on your `PATH`, and an npm install needs nothing further either.
 
 Ditto CLI installs as `ditto-cli`, not `ditto`: macOS already uses that name for its built-in file-copy utility at `/usr/bin/ditto`.
 
@@ -100,6 +112,12 @@ A Homebrew install updates through Homebrew:
 brew upgrade ditto-cli
 ```
 
+An npm install updates through npm:
+
+```bash
+npm install -g @reyanshgupta/ditto-cli@latest
+```
+
 A Cargo install updates itself:
 
 ```bash
@@ -111,6 +129,8 @@ ditto-cli update --git     # install from the Git repository instead
 `update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release. Asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
 
 `update` only replaces a copy in Cargo's own bin directory. Run it against a Homebrew install, or a binary from the [releases page](https://github.com/reyanshgupta/ditto-cli/releases), and it says so before it starts, then leaves that copy alone: a `cargo install` would land in a different directory and shadow the existing binary rather than replace it. Use `brew upgrade ditto-cli` or the newer archive instead.
+
+Against an npm install it does not start at all. npm keeps its copy inside its own tree, so `update` names the npm command and stops rather than leaving you with two copies and whichever `PATH` reaches first. Pass `--git` if a source build is what you actually want.
 
 ## Quick start
 

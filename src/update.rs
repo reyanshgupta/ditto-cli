@@ -13,8 +13,23 @@ const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 const INSTALLED_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
+/// Set by the launcher npm installs in front of the binary, since nothing about
+/// the running program otherwise says which channel it arrived through.
+const INSTALL_SOURCE: &str = "DITTO_INSTALL_SOURCE";
+
+/// Scoped because plain `ditto-cli` on npm was already an unrelated project's.
+const NPM_PACKAGE: &str = "@reyanshgupta/ditto-cli";
+
 pub fn run(check: bool, from_git: bool) -> Result<()> {
     println!("Installed  {INSTALLED_VERSION}");
+
+    // `--git` asks for a source build in so many words, and that copy landing
+    // in Cargo's bin directory is answered by the warning below, so only the
+    // two commands that would otherwise reach for crates.io are intercepted.
+    if !from_git && installed_by_npm() {
+        report_npm_install();
+        return Ok(());
+    }
 
     if check {
         let published = published_version()?;
@@ -84,6 +99,22 @@ pub fn run(check: bool, from_git: bool) -> Result<()> {
         bail!("cargo install failed with {status}");
     }
     Ok(())
+}
+
+fn installed_by_npm() -> bool {
+    env::var_os(INSTALL_SOURCE).is_some_and(|source| source == "npm")
+}
+
+/// npm keeps its copy inside its own tree, so `cargo install` would add a
+/// second one to Cargo's bin directory and leave which of them runs to
+/// whichever comes first on `PATH`. The npm command is named rather than run:
+/// it replaces the program that would be running it, which Windows refuses
+/// outright, and npm is the thing that knows how to stand itself back up.
+fn report_npm_install() {
+    println!();
+    println!("This copy was installed with npm, so cargo cannot replace it.");
+    println!("Check for a newer one with `npm view {NPM_PACKAGE} version`.");
+    println!("Install it with `npm install -g {NPM_PACKAGE}@latest`.");
 }
 
 /// `cargo install` writes into Cargo's own bin directory. A binary taken from

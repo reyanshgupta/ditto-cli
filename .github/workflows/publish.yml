@@ -301,3 +301,111 @@ jobs:
           git add Formula/ditto-cli.rb
           git commit -m "ditto-cli ${CRATE_VERSION}"
           git push
+
+  # npm reaches the people this tool is for: anyone running Claude Code or
+  # Codex already has npm, and it is the one channel that covers macOS, Linux
+  # and Windows at once. Runs after the release, and for the same reason the
+  # tap does — the packages carry the archives the release published, checked
+  # against the SHA256SUMS it wrote, so npm cannot serve a binary that nobody
+  # downloading from anywhere else was given.
+  npm:
+    name: Publish to npm
+    needs:
+      - verify
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Provenance is signed against the workflow's own OIDC identity, which is
+      # what lets npm show the packages as built from this tag.
+      id-token: write
+
+    steps:
+      # Checks out the ref the workflow is running from rather than the release
+      # tag, on the same reasoning as the tap job above: the packages are
+      # rendered from a version number and the archives the release published,
+      # so pinning to the tag would only put a fix to this tooling out of reach
+      # of every tag cut before it.
+      - name: Check out the release tooling
+        uses: actions/checkout@v7
+
+      # npm is an optional channel like the tap, so a missing token warns and
+      # skips rather than failing a release that has already gone out.
+      - name: Check for an npm token
+        id: token
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN is not set; npm stays on its previous version"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # No setup-node step: the runner already has a Node new enough to publish
+      # with provenance, and nothing here is built with it. The registry line
+      # is written unexpanded so the token reaches npm from the environment
+      # rather than sitting in a file.
+      - name: Authenticate with npm
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        run: |
+          cat > "${HOME}/.npmrc" <<'NPMRC'
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          NPMRC
+
+      - name: Download the release archives
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p archives
+          gh release download "${RELEASE_TAG}" \
+            --dir archives \
+            --repo "${GITHUB_REPOSITORY}"
+
+      - name: Verify the archives against the release checksums
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        working-directory: archives
+        run: sha256sum --check SHA256SUMS
+
+      - name: Render the packages
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
+        run: ./.github/npm/render-packages.sh "${CRATE_VERSION}" archives npm-dist
+
+      # The binary packages go first. The wrapper names them as optional
+      # dependencies, so a wrapper on the registry ahead of them is a version
+      # that installs and then has nothing to run.
+      - name: Publish the packages
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
+        run: |
+          publish() {
+            local directory="npm-dist/$1"
+            local name
+            name="$(node -p "require('./${directory}/package.json').name")"
+            # A re-run from workflow_dispatch reaches packages that are already
+            # up, and npm refuses to publish over a version rather than skip
+            # it, so the registry is asked first.
+            if npm view "${name}@${CRATE_VERSION}" version > /dev/null 2>&1; then
+              echo "${name}@${CRATE_VERSION} is already published"
+              return 0
+            fi
+            npm publish "${directory}" --access public --provenance
+          }
+
+          publish ditto-cli-darwin-arm64
+          publish ditto-cli-darwin-x64
+          publish ditto-cli-linux-x64
+          publish ditto-cli-win32-x64
+          publish ditto-cli

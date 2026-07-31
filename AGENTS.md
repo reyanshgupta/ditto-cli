@@ -113,7 +113,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `herdr.rs` | Reading `HERDR_PANE_ID`, and reporting the profile to herdr as pane metadata. Why the proxy is skipped inside a herdr pane. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
 | `shell.rs` | The `shell-init` functions that route a tool's own name through Ditto, and reading `SHELL` to pick a dialect. |
-| `update.rs` | `ditto-cli update`, which shells out to `cargo install`. |
+| `update.rs` | `ditto-cli update`, which shells out to `cargo install`, or names the npm command when npm is what installed this copy. |
 
 ### Checks
 
@@ -185,11 +185,28 @@ git tag -a vX.Y.Z -m "Ditto CLI X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The workflow checks the tag against `cargo metadata`'s version and stops if they disagree, runs the suite on Linux, macOS and Windows, publishes with `cargo publish --locked`, builds the per-platform binaries, and updates the Homebrew tap. Confirm the release landed rather than assuming the push was enough:
+The workflow checks the tag against `cargo metadata`'s version and stops if they disagree, runs the suite on Linux, macOS and Windows, publishes with `cargo publish --locked`, builds the per-platform binaries, updates the Homebrew tap, and publishes the npm packages. Confirm the release landed rather than assuming the push was enough:
 
 ```bash
 gh run list --workflow=publish.yml --limit 1
 curl -s https://crates.io/api/v1/crates/ditto-cli | jq -r .crate.max_version
+npm view @reyanshgupta/ditto-cli version
 ```
 
-`workflow_dispatch` re-runs a release from an existing tag, which is how to retry one whose publish succeeded but whose later jobs did not: the publish job asks the registry directly and skips a version already there. The tap job is the one step that checks out `main` rather than the tag, so a fix to the rendering tooling reaches a tag cut before that fix existed.
+`workflow_dispatch` re-runs a release from an existing tag, which is how to retry one whose publish succeeded but whose later jobs did not: every publishing job asks its registry first and skips a version already there. The tap and npm jobs are the steps that check out `main` rather than the tag, so a fix to the rendering tooling reaches a tag cut before that fix existed. Both are optional channels holding a secret the fork of a contributor will not have — `TAP_GITHUB_TOKEN` and `NPM_TOKEN` — so a missing one warns and skips rather than failing a release that already went out.
+
+### Distribution
+
+Five channels carry the same four binaries, and all of them are rendered from what the release published rather than rebuilt, so none can describe an archive nobody downloaded.
+
+| Channel | Built by | Notes |
+| --- | --- | --- |
+| crates.io | `cargo publish --locked` | The only one that compiles on the user's machine. |
+| Releases page | The `build` job | The archives every other channel reads. |
+| Homebrew tap | `.github/homebrew/render-formula.sh` | Checksums read out of `SHA256SUMS`. |
+| npm | `.github/npm/render-packages.sh` | Binaries unpacked out of the archives themselves. |
+| `cargo binstall` | `[package.metadata.binstall]` | No job; it reads the archives off the releases page. |
+
+npm is five packages, not one. npm cannot publish one package carrying four platforms' binaries, so a release is a wrapper package plus a binary package per platform that npm installs only when `os` and `cpu` match. The binary packages publish first: the wrapper names them as optional dependencies, so a wrapper reaching the registry ahead of them is a version that installs and then has nothing to run. The wrapper's `bin` is the launcher in `.github/npm/launcher.js`, which finds the binary package that was installed and hands the terminal to it — it also sets `DITTO_INSTALL_SOURCE=npm`, which is how `update.rs` knows to name the npm command instead of reaching for cargo.
+
+The binstall metadata spells out the release's archive names because they are not the ones it guesses. Renaming an archive in the packaging steps means changing `pkg-url` in `Cargo.toml` in the same commit, or `cargo binstall ditto-cli` starts 404ing with nothing to say why.

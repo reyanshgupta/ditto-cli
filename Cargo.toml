@@ -13,6 +13,21 @@ readme = "README.md"
 keywords = ["claude-code", "codex", "opencode", "omp", "profiles"]
 categories = ["command-line-utilities"]
 
+# `cargo binstall` downloads the release archive rather than compiling, which
+# matters here because a source build compiles bundled SQLite before it links
+# anything. The names it guesses by default are not the ones the release
+# workflow writes, so the pattern is spelled out; keep it in step with the
+# packaging steps in .github/workflows/publish.yml.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+# The Windows archive is the one zip among the tarballs, because Compress-Archive
+# is what the Windows runner has.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "ditto-cli"
 path = "src/main.rs"

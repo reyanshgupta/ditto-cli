@@ -159,6 +159,14 @@ pub struct SyncArgs {
     /// makes it worth having; with it your own configuration wins outright.
     #[arg(long)]
     pub overwrite: bool,
+    /// Point the skills, agents, commands, hooks, and plugins this profile has
+    /// its own copies of back at yours.
+    ///
+    /// Profiles made before Ditto shared any of that have real directories
+    /// where the links go, and replacing one is a thing to ask for. What was
+    /// there is moved aside rather than deleted.
+    #[arg(long)]
+    pub adopt: bool,
 }
 
 #[derive(Debug, Args)]
@@ -280,14 +288,18 @@ mod tests {
         let named = Cli::try_parse_from(["ditto-cli", "sync", "work"]).unwrap();
         assert!(matches!(
             named.command,
-            Some(Command::Sync(SyncArgs { profile, overwrite }))
+            Some(Command::Sync(SyncArgs {
+                profile, overwrite, ..
+            }))
                 if profile.as_deref() == Some("work") && !overwrite
         ));
 
         let bare = Cli::try_parse_from(["ditto-cli", "sync", "--overwrite"]).unwrap();
         assert!(matches!(
             bare.command,
-            Some(Command::Sync(SyncArgs { profile, overwrite }))
+            Some(Command::Sync(SyncArgs {
+                profile, overwrite, ..
+            }))
                 if profile.is_none() && overwrite
         ));
     }

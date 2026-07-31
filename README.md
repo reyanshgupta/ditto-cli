@@ -418,7 +418,7 @@ The `tool`, `status`, and `indicator` outcome strings are stable identifiers mea
 
 Claude Code reads its settings from the configuration directory it is pointed at, and Ditto CLI points it somewhere else. Left alone, a new profile would start with none of the permission mode, model, effort level, or hooks you set up once and expect everywhere.
 
-So creating a profile copies `~/.claude/settings.json` into it. What Ditto CLI isolates is accounts, and none of those live in that file — Claude Code keeps credentials in the Keychain and the signed-in account in `.claude.json` — so your preferences travel and your logins stay apart. The status line is the one key not copied, because it names the profile it was installed for.
+So creating a profile copies `~/.claude/settings.json` into it. What Ditto CLI isolates is accounts, and none of those live in that file — Claude Code keeps credentials in the Keychain and the signed-in account in `.claude.json` — so your preferences travel and your logins stay apart. The status line travels too: the entry names the profile it was installed for, so what is copied is the status line underneath it, with the new profile's own indicator drawn in front of yours.
 
 From then on the profile's settings are its own. Change the model in one profile and the others keep theirs; a later `ditto-cli sync` fills in settings the profile has never answered and leaves the ones it has:
 
@@ -428,6 +428,28 @@ ditto-cli sync client-a --overwrite  # your configuration wins outright
 ```
 
 `sync` is also how profiles created before this behaviour existed catch up.
+
+## Skills, subagents, and everything else you set up once
+
+A profile exists to be signed in as somebody else, not to be a different working environment. Skills, subagents, slash commands, hooks, plugins, and the memory file each tool reads are not accounts, so a profile does not get its own copy of them — it reads yours:
+
+| Tool | Read from your own configuration |
+| --- | --- |
+| Claude Code | `skills`, `agents`, `commands`, `hooks`, `plugins`, `output-styles`, `CLAUDE.md` |
+| Codex | `skills`, `rules`, `prompts`, `plugins`, `config.toml`, `hooks.json`, `AGENTS.md`, `instructions.md` |
+| opencode | the whole configuration directory |
+| OMP | `config.yml`, `extensions` |
+
+These are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync and no copies to drift apart. Everything else — `.claude.json`, `auth.json`, sessions, history, `agent.db` — stays inside the profile, which is the whole of what a profile keeps to itself.
+
+What is shared is a named list rather than everything-but-the-credentials. Ditto CLI learning about a new extension directory late costs you a missing feature; sharing a new credential file by accident would cost you the isolation the tool exists for.
+
+Profiles created before this have real directories where the links go. `sync` reports those and leaves them alone; `--adopt` points them at yours, moving what was there aside as `<name>.before-ditto` rather than deleting it:
+
+```bash
+ditto-cli sync client-a           # link what can be linked, report what cannot
+ditto-cli sync client-a --adopt   # replace the profile's own copies too
+```
 
 ## Where credentials and files are stored
 

@@ -6,6 +6,7 @@ mod program;
 #[cfg(unix)]
 mod proxy;
 mod settings;
+mod shared;
 mod shell;
 mod ui;
 mod update;
@@ -273,6 +274,10 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
     // new profile would otherwise start with none of the permission mode,
     // model, or hooks its owner set up once and expects everywhere.
     let copied = settings::seed(store, &profile);
+    // Skills, subagents, commands, hooks and plugins are not accounts, and a
+    // profile that started without them would be a different working
+    // environment rather than the same one signed in as somebody else.
+    let linked = shared::seed(store, &profile);
 
     report(
         json,
@@ -282,6 +287,7 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             // that are part of the answer rather than a note beside it.
             created["created"] = json!(true);
             created["settings_copied"] = json!(copied.copied);
+            created["shared"] = json!(linked.linked);
             created["sign_in"] = json!({
                 "claude": format!("ditto-cli claude {} -- auth login", profile.name),
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
@@ -297,6 +303,9 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
                     "Copied your Claude Code settings into it: {}.",
                     copied.copied.join(", ")
                 );
+            }
+            if !linked.linked.is_empty() {
+                println!("Reading yours for: {}.", linked.linked.join(", "));
             }
             print_login_instructions(&profile);
         },
@@ -316,6 +325,7 @@ fn sync_settings(
     let (profile, _) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
     let source = store.load_profile(DEFAULT_PROFILE)?;
     let copied = settings::copy(&source, &profile, arguments.overwrite)?;
+    let linked = shared::link(&source, &profile, arguments.adopt)?;
 
     report(
         json,
@@ -325,7 +335,14 @@ fn sync_settings(
                 "source": source.name,
                 "copied": copied.copied,
                 "kept": copied.kept,
-                "changed": copied.changed(),
+                "shared": linked.linked,
+                "shared_kept": linked.kept,
+                "shared_failed": linked
+                    .failed
+                    .iter()
+                    .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+                    .collect::<Vec<_>>(),
+                "changed": copied.changed() || linked.changed(),
             })
         },
         || {
@@ -351,6 +368,24 @@ fn sync_settings(
                     "  Replace those too with `ditto-cli sync {} --overwrite`.",
                     profile.name
                 );
+            }
+            if !linked.linked.is_empty() {
+                println!("Reading yours for: {}.", linked.linked.join(", "));
+            }
+            if !linked.kept.is_empty() {
+                println!(
+                    "'{}' has its own and keeps it: {}.",
+                    profile.name,
+                    linked.kept.join(", ")
+                );
+                println!(
+                    "  Point those at yours too with `ditto-cli sync {} --adopt`, \
+                     which moves what is there aside rather than deleting it.",
+                    profile.name
+                );
+            }
+            for (path, reason) in &linked.failed {
+                println!("Could not share {path}: {reason}");
             }
         },
     );

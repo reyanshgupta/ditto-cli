@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
 use crate::{
-    indicator::KEY as OWNED,
+    indicator::{self, Inherit, KEY as OWNED},
     profile::{DEFAULT_PROFILE, Profile, Store, write_private_file},
 };
 
@@ -64,11 +64,11 @@ pub fn copy(source: &Profile, target: &Profile, overwrite: bool) -> Result<Copie
     let from = read(&path(source))?;
     let mut into = read(&path(target))?;
     let mut result = Copied::default();
+    // Read before the loop consumes the map. The status line is the one key
+    // that cannot travel as it stands, so it is settled on its own terms below.
+    let theirs = from.get(OWNED).cloned();
 
     for (key, value) in from {
-        // The status line names the profile it was installed for, and carries
-        // the one it is drawn in front of, so copying it forward would leave a
-        // new profile describing the old one.
         if key == OWNED {
             continue;
         }
@@ -80,6 +80,16 @@ pub fn copy(source: &Profile, target: &Profile, overwrite: bool) -> Result<Copie
                 result.copied.push(key);
             }
         }
+    }
+
+    let current = into.get(OWNED).cloned();
+    match indicator::inherit(theirs.as_ref(), current.as_ref(), overwrite)? {
+        Inherit::Install(entry) => {
+            into.insert(OWNED.to_owned(), entry);
+            result.copied.push(OWNED.to_owned());
+        }
+        Inherit::Keep => result.kept.push(OWNED.to_owned()),
+        Inherit::Already | Inherit::Nothing => {}
     }
 
     if result.changed() {
@@ -172,10 +182,12 @@ mod tests {
         assert_eq!(settings(&target)["model"], "opus");
     }
 
-    /// The status line names the profile it was installed for, so it is the one
-    /// key that must not travel between profiles.
+    /// The status line names the profile it was installed for, so it cannot
+    /// travel as it stands. The one underneath it is the user's own and does,
+    /// with the profile drawn in front of it: dropping the key outright used to
+    /// cost people the status line they had configured.
     #[test]
-    fn never_copies_the_status_line() {
+    fn keeps_the_status_line_you_had_and_draws_the_profile_in_front() {
         let temporary = tempdir().unwrap();
         let store = store(temporary.path());
         let source = store.load_profile(DEFAULT_PROFILE).unwrap();
@@ -187,8 +199,62 @@ mod tests {
         let target = store.create_profile("work").unwrap();
         let copied = copy(&source, &target, false).unwrap();
 
-        assert_eq!(copied.copied, ["theme"]);
-        assert!(settings(&target).get("statusLine").is_none());
+        assert_eq!(copied.copied, ["statusLine", "theme"]);
+        let installed = settings(&target)["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(installed.contains("statusline"), "{installed}");
+        assert!(installed.contains("mine.sh"), "{installed}");
+    }
+
+    /// A profile that has only ever been launched carries Ditto's own entry
+    /// drawn in front of nothing, which is a default rather than a decision.
+    /// Syncing replaces it, so the profiles made before any of this could be
+    /// brought up to date without `--overwrite`.
+    #[test]
+    fn replaces_the_bare_indicator_a_launch_left_behind() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given(
+            &source,
+            r#"{"statusLine":{"type":"command","command":"mine.sh"}}"#,
+        );
+
+        let target = store.create_profile("work").unwrap();
+        crate::indicator::enable(&target, crate::indicator::Existing::LeaveAlone).unwrap();
+        let copied = copy(&source, &target, false).unwrap();
+
+        assert_eq!(copied.copied, ["statusLine"]);
+        assert!(
+            settings(&target)["statusLine"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("mine.sh")
+        );
+    }
+
+    /// A status line the profile was given on purpose is a decision, and stands.
+    #[test]
+    fn leaves_a_status_line_the_profile_chose_for_itself() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given(
+            &source,
+            r#"{"statusLine":{"type":"command","command":"mine.sh"}}"#,
+        );
+
+        let target = store.create_profile("work").unwrap();
+        given(
+            &target,
+            r#"{"statusLine":{"type":"command","command":"theirs.sh"}}"#,
+        );
+        let copied = copy(&source, &target, false).unwrap();
+
+        assert_eq!(copied.kept, ["statusLine"]);
+        assert_eq!(settings(&target)["statusLine"]["command"], "theirs.sh");
     }
 
     /// A profile exists to differ from the defaults, so what it says about a

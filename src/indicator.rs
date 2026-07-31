@@ -26,8 +26,9 @@ use crate::{
 /// the project files that outrank a profile's share with the profile's own.
 const SETTINGS: &str = "settings.json";
 /// The one key in that file Ditto ever writes. Public because it is also the
-/// one key `settings` must not copy from one profile to another: it names the
-/// profile it was installed for.
+/// one key `settings` cannot copy from one profile to another as it stands: it
+/// names the profile it was installed for, so what travels is the status line
+/// underneath it. See [`inherit`].
 pub const KEY: &str = "statusLine";
 /// The Ditto subcommand Claude Code runs to draw the status line.
 const SUBCOMMAND: &str = "statusline";
@@ -205,6 +206,71 @@ pub fn state(profile: &Profile) -> Result<Indicator> {
         Some(current) if wrapped_command(current).is_some() => Indicator::Alongside,
         Some(_) => Indicator::AlreadyOn,
     })
+}
+
+/// What copying a settings file into a profile should do about its status line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Inherit {
+    /// Write this entry into the profile.
+    Install(Value),
+    /// The profile already carries exactly this.
+    Already,
+    /// The profile has a status line of its own, which stands.
+    Keep,
+    /// There is no status line to copy.
+    Nothing,
+}
+
+/// The status line a profile should carry once its owner's settings have been
+/// copied into it.
+///
+/// An installed entry names the profile it was installed for, so it cannot
+/// travel between profiles as it stands. What travels is the status line
+/// underneath it — the one its owner wrote — with the new profile's own
+/// indicator drawn in front of that. Copying settings forward then costs nobody
+/// the status line they configured, which is what dropping the key entirely
+/// used to do.
+///
+/// A profile whose entry is Ditto's own and draws nothing in front of anything
+/// has not had a status line chosen for it: that is what a launch installs when
+/// it found nothing to keep. Replacing it overwrites no decision, so it happens
+/// without being asked for. Anything else the profile carries is a decision and
+/// stands unless `overwrite` says otherwise.
+pub fn inherit(
+    theirs: Option<&Value>,
+    current: Option<&Value>,
+    overwrite: bool,
+) -> Result<Inherit> {
+    let Some(theirs) = theirs else {
+        return Ok(Inherit::Nothing);
+    };
+    let ours = ditto_status_line()?;
+    let wanted = match underneath(theirs, &ours) {
+        Some(own) => keeping(&own, &ours).unwrap_or_else(|| ours.clone()),
+        None => ours.clone(),
+    };
+
+    Ok(match current {
+        None => Inherit::Install(wanted),
+        Some(current) if *current == wanted => Inherit::Already,
+        // Ditto's own entry, drawn in front of nothing: the default a launch
+        // leaves behind rather than something anyone asked for.
+        Some(current) if is_ditto(current, Some(&ours)) && wrapped_command(current).is_none() => {
+            Inherit::Install(wanted)
+        }
+        Some(_) if overwrite => Inherit::Install(wanted),
+        Some(_) => Inherit::Keep,
+    })
+}
+
+/// The status line a person wrote, read out of an entry that may be Ditto's
+/// drawn in front of theirs. Nothing when the entry is Ditto's own and there is
+/// nothing of theirs beneath it.
+fn underneath(entry: &Value, ours: &Value) -> Option<Value> {
+    if is_ditto(entry, Some(ours)) {
+        return displaced(entry);
+    }
+    Some(entry.clone())
 }
 
 /// Installs the status line without letting a settings problem stop a launch.

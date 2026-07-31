@@ -107,6 +107,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
+| `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — and the linking itself. |
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
@@ -139,6 +140,8 @@ cargo clippy --all-targets -- -D warnings
 
 **Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place, `Alongside` exists so that the way to have both is to keep theirs rather than to overwrite it, and `settings::copy` withholds every key the profile has already answered unless `--overwrite` asks for it. Extend that pattern rather than working around it: when Ditto has to sit where something of the user's already is, run theirs, keep everything it carried, and be able to hand it back.
 
+**Isolate accounts, share everything else.** A profile exists to be signed in as somebody else, not to be a different working environment. Credentials and session state stay in the profile; skills, subagents, commands, hooks, plugins and the memory files are linked back to the user's own configuration by `shared.rs`, so there is one copy edited in one place. That list is an allowlist and must stay one: teaching Ditto a new extension directory late costs a missing feature, and sharing a credential file by accident costs the isolation the tool exists for. Claude Code's `settings.json` is the one thing copied rather than linked, because Ditto writes the status line into it.
+
 **Cross-platform.** Windows is supported. Gate with `#[cfg(unix)]` / `#[cfg(windows)]`, and prefer `crossterm` over writing escape sequences directly. `program.rs` compiles on every platform even though only Windows calls it, on the reasoning that a rule nobody can exercise is a rule nobody checks — keep that property when touching it.
 
 **Profile names** are validated once, in `profile::validate_profile_name`, against the strictest tool: OMP takes the name verbatim and requires `^[a-z0-9][a-z0-9._-]{0,63}$`, rejecting trailing dots and Windows device names. Ditto applies those rules at creation so a name cannot be created that later fails only when OMP launches. Do not loosen this in one place.
@@ -156,7 +159,7 @@ cargo clippy --all-targets -- -D warnings
 
 ### Adding a tool
 
-Extend `Tool` in `launch.rs`: `ALL`, `label`, `key`, `executable` (with its `DITTO_*_BIN` override), the status args in `auth_status`, and `AuthOperation::args`. Then give it a home in `Profile` and `Store::managed_profile`/`default_profile` in `profile.rs`, add it to `create_profile`'s directory list, and surface it in `paths`, `status`, and `ui.rs`. `shell.rs` needs nothing: it writes a function for every entry in `Tool::ALL`, and a test fails if one is missing.
+Extend `Tool` in `launch.rs`: `ALL`, `label`, `key`, `executable` (with its `DITTO_*_BIN` override), the status args in `auth_status`, and `AuthOperation::args`. Then give it a home in `Profile` and `Store::managed_profile`/`default_profile` in `profile.rs`, add it to `create_profile`'s directory list, and surface it in `paths`, `status`, and `ui.rs`. Add its configuration and extension paths to the allowlist in `shared.rs` and its credential and session paths to nothing, so a profile of the new tool starts as the same working environment signed in as somebody else. `shell.rs` needs nothing: it writes a function for every entry in `Tool::ALL`, and a test fails if one is missing.
 
 ### Versioning
 

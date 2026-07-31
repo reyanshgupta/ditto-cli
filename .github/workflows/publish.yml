@@ -228,3 +228,69 @@ jobs:
               --verify-tag \
               --repo "${GITHUB_REPOSITORY}"
           fi
+
+  # Runs after the release so the formula can read the checksums from the
+  # SHA256SUMS that release published, rather than recomputing them here and
+  # risking a formula that describes archives nobody downloaded.
+  homebrew:
+    name: Update Homebrew tap
+    needs:
+      - verify
+      - release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # The tap is a second repository, and GITHUB_TOKEN cannot push to it. A
+      # release should not fail over an optional distribution channel, so a
+      # missing token skips the update loudly instead of erroring.
+      - name: Check for a tap token
+        id: token
+        shell: bash
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [[ -z "${TAP_TOKEN}" ]]; then
+            echo "::warning::TAP_GITHUB_TOKEN is not set; the Homebrew tap stays on its previous version"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the tap
+        if: steps.token.outputs.present == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: reyanshgupta/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Render the formula
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        env:
+          CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
+        run: |
+          mkdir -p tap/Formula
+          ./.github/homebrew/render-formula.sh "${CRATE_VERSION}" > tap/Formula/ditto-cli.rb
+
+      - name: Commit the formula
+        if: steps.token.outputs.present == 'true'
+        shell: bash
+        working-directory: tap
+        env:
+          CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
+        run: |
+          if git diff --quiet -- Formula/ditto-cli.rb; then
+            echo "Formula is already at ${CRATE_VERSION}"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/ditto-cli.rb
+          git commit -m "ditto-cli ${CRATE_VERSION}"
+          git push

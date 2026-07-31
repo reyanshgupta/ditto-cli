@@ -57,7 +57,15 @@ No config files are swapped. Profiles remain independent, and switching only aff
 
 ## Install
 
-Ditto CLI needs Rust 1.85 or newer to build, and at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), or [Oh My Pi](https://github.com/can1357/oh-my-pi).
+Ditto CLI needs at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), or [Oh My Pi](https://github.com/can1357/oh-my-pi).
+
+On macOS and Linux, Homebrew installs the prebuilt binary for your platform, so it needs no Rust toolchain:
+
+```bash
+brew install reyanshgupta/tap/ditto-cli
+```
+
+Cargo builds from source instead, and needs Rust 1.85 or newer:
 
 ```bash
 cargo install ditto-cli                                          # from crates.io
@@ -72,7 +80,7 @@ cd ditto-cli
 cargo install --path .
 ```
 
-Make sure Cargo's binary directory is on your `PATH`:
+After a Cargo install, make sure Cargo's binary directory is on your `PATH`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -86,6 +94,14 @@ macOS, Linux, and Windows are all supported, and every command below behaves the
 
 ### Update
 
+A Homebrew install updates through Homebrew:
+
+```bash
+brew upgrade ditto-cli
+```
+
+A Cargo install updates itself:
+
 ```bash
 ditto-cli update           # install the newest crates.io release
 ditto-cli update --check   # compare versions without installing
@@ -94,7 +110,7 @@ ditto-cli update --git     # install from the Git repository instead
 
 `update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release. Asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
 
-If you are running a binary from the [releases page](https://github.com/reyanshgupta/ditto-cli/releases) rather than a `cargo install` copy, `update` says so before it starts: cargo writes into its own bin directory and leaves the downloaded binary untouched. Replace that file yourself, or download the newer archive.
+`update` only replaces a copy in Cargo's own bin directory. Run it against a Homebrew install, or a binary from the [releases page](https://github.com/reyanshgupta/ditto-cli/releases), and it says so before it starts, then leaves that copy alone: a `cargo install` would land in a different directory and shadow the existing binary rather than replace it. Use `brew upgrade ditto-cli` or the newer archive instead.
 
 ## Quick start
 

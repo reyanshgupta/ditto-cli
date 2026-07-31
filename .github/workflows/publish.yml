@@ -329,35 +329,44 @@ jobs:
       - name: Check out the release tooling
         uses: actions/checkout@v7
 
-      # npm is an optional channel like the tap, so a missing token warns and
-      # skips rather than failing a release that has already gone out.
-      - name: Check for an npm token
-        id: token
+      # npm authenticates as this workflow rather than as a token: the packages
+      # name `publish.yml` in this repository as their trusted publisher, and
+      # the OIDC identity the runner mints is what proves it is really this
+      # file running. The npm the runner ships has to be new enough to ask,
+      # which is what this reports before anything depends on it.
+      - name: Report the npm that will publish
+        shell: bash
+        run: |
+          echo "node $(node --version), npm $(npm --version)"
+          # Trusted publishing arrived in 11.5.1. An older npm falls back to the
+          # token below and publishes without provenance rather than failing, so
+          # this says so rather than stopping.
+          if [[ "$(printf '%s\n11.5.1\n' "$(npm --version)" | sort -V | head -1)" != "11.5.1" ]]; then
+            echo "::warning::npm $(npm --version) predates trusted publishing; falling back to NPM_TOKEN"
+          fi
+
+      # The token is a fallback, not the mechanism. npm reaches for an OIDC
+      # environment before it reaches for a token, so this is what publishes a
+      # package whose trusted publisher has not been configured yet — and it is
+      # ignored entirely once one has. A release must not fail for the want of
+      # it, so a missing token is written as an empty file and left to npm.
+      - name: Write the npm token, if there is one
         shell: bash
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [[ -z "${NPM_TOKEN}" ]]; then
-            echo "::warning::NPM_TOKEN is not set; npm stays on its previous version"
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "No NPM_TOKEN; publishing as this workflow through trusted publishing"
+            : > "${HOME}/.npmrc"
+            exit 0
           fi
-
-      # No setup-node step: the runner already has a Node new enough to publish
-      # with provenance, and nothing here is built with it. The registry line
-      # is written unexpanded so the token reaches npm from the environment
-      # rather than sitting in a file.
-      - name: Authenticate with npm
-        if: steps.token.outputs.present == 'true'
-        shell: bash
-        run: |
+          # Written unexpanded so the token reaches npm from the environment
+          # rather than sitting in a file on the runner.
           cat > "${HOME}/.npmrc" <<'NPMRC'
           //registry.npmjs.org/:_authToken=${NPM_TOKEN}
           NPMRC
 
       - name: Download the release archives
-        if: steps.token.outputs.present == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -368,13 +377,11 @@ jobs:
             --repo "${GITHUB_REPOSITORY}"
 
       - name: Verify the archives against the release checksums
-        if: steps.token.outputs.present == 'true'
         shell: bash
         working-directory: archives
         run: sha256sum --check SHA256SUMS
 
       - name: Render the packages
-        if: steps.token.outputs.present == 'true'
         shell: bash
         env:
           CRATE_VERSION: ${{ needs.verify.outputs.crate_version }}
@@ -384,7 +391,6 @@ jobs:
       # dependencies, so a wrapper on the registry ahead of them is a version
       # that installs and then has nothing to run.
       - name: Publish the packages
-        if: steps.token.outputs.present == 'true'
         shell: bash
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -405,6 +411,10 @@ jobs:
             # shorthand for a repository, so without it npm goes looking for
             # github.com/npm-dist/ditto-cli-darwin-arm64 over SSH rather than
             # publishing the directory sitting right there.
+            # `--provenance` is redundant under trusted publishing, which signs
+            # an attestation on its own, and is the only way to get one on the
+            # token fallback. Passing it always is what makes both paths leave
+            # the same evidence behind.
             npm publish "./${directory}" --access public --provenance
           }
 

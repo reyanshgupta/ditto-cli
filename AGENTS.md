@@ -197,7 +197,7 @@ curl -s -H 'User-Agent: ditto-cli release check' \
 npm view @reyanshgupta/ditto-cli version
 ```
 
-`workflow_dispatch` re-runs a release from an existing tag, which is how to retry one whose publish succeeded but whose later jobs did not: every publishing job asks its registry first and skips a version already there. The tap and npm jobs are the steps that check out `main` rather than the tag, so a fix to the rendering tooling reaches a tag cut before that fix existed. Both are optional channels holding a secret the fork of a contributor will not have — `TAP_GITHUB_TOKEN` and `NPM_TOKEN` — so a missing one warns and skips rather than failing a release that already went out.
+`workflow_dispatch` re-runs a release from an existing tag, which is how to retry one whose publish succeeded but whose later jobs did not: every publishing job asks its registry first and skips a version already there. The tap and npm jobs are the steps that check out `main` rather than the tag, so a fix to the rendering tooling reaches a tag cut before that fix existed. The tap job needs `TAP_GITHUB_TOKEN`, which a contributor's fork will not have, so a missing one warns and skips rather than failing a release that already went out.
 
 ### Distribution
 
@@ -213,6 +213,15 @@ Five channels carry the same four binaries, and all of them are rendered from wh
 
 npm is five packages, not one. npm cannot publish one package carrying four platforms' binaries, so a release is a wrapper package plus a binary package per platform that npm installs only when `os` and `cpu` match. The binary packages publish first: the wrapper names them as optional dependencies, so a wrapper reaching the registry ahead of them is a version that installs and then has nothing to run. The wrapper's `bin` is the launcher in `.github/npm/launcher.js`, which finds the binary package that was installed and hands the terminal to it — it also sets `DITTO_INSTALL_SOURCE=npm`, which is how `update.rs` knows to name the npm command instead of reaching for cargo.
 
-`NPM_TOKEN` has to be a granular access token, or a classic *automation* token. A classic *publish* token still asks for a one-time password on every write when the account requires 2FA for them, and there is nobody at a runner to type one: the job gets as far as signing provenance and uploading before npm turns it away with `EOTP`. Grant it the `@reyanshgupta` scope rather than named packages, since a release adds packages that did not exist when the token was made.
+npm authenticates the job as the workflow, not as a token. Each of the five packages names `publish.yml` in this repository as its trusted publisher, and the OIDC identity the runner mints is what proves it really is this file running — which is why the job asks for `id-token: write` and why renaming the workflow file would break publishing until the five configurations were repointed at the new name. Provenance comes with it, unasked.
+
+Configuring that needs the package to already exist, on npm's side, so the first version of each was published by hand. Neither the website nor `npm trust` will attach a publisher to a name nobody has published. A sixth package, should there ever be one, is the same story: publish it once from a laptop, then
+
+```bash
+npm trust github @reyanshgupta/ditto-cli-<platform> \
+  --repo reyanshgupta/ditto-cli --file publish.yml --allow-publish
+```
+
+`NPM_TOKEN` is a fallback and not the mechanism. npm reaches for an OIDC environment before it reaches for a token, so the token only publishes a package whose trusted publisher is not configured, and is ignored once one is. Do not put a classic *publish* token there: it asks for a one-time password on every write when the account requires 2FA for them, and there is nobody at a runner to type one, so the job gets as far as signing provenance and uploading before npm turns it away with `EOTP`. npm began restricting bypass-2FA granular tokens on 31 July 2026 and removes their publishing entirely in January 2027, which is the other reason the token is the fallback rather than the plan.
 
 The binstall metadata spells out the release's archive names because they are not the ones it guesses. Renaming an archive in the packaging steps means changing `pkg-url` in `Cargo.toml` in the same commit, or `cargo binstall ditto-cli` starts 404ing with nothing to say why.

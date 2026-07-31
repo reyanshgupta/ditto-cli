@@ -168,3 +168,27 @@ Ditto CLI is pre-1.0 and uses `0.x.y` semantic versions.
 - Reserve `0.x.0` releases for major project milestones, intentionally breaking changes, or substantial feature sets that establish a new release series.
 - Use patch increments for routine features, fixes, documentation, workflow changes, and other incremental work. For example, release a routine change after `0.2.0` as `0.2.1`, not `0.3.0`.
 - Keep the version in `Cargo.toml`, the resolved package version in `Cargo.lock`, and the Git tag `vX.Y.Z` aligned when preparing a release.
+
+### Releasing
+
+**The version bump does not publish anything. The tag does.** `.github/workflows/publish.yml` fires on a pushed tag matching `v[0-9]+.[0-9]+.[0-9]+`, and nothing else does. A `Release X.Y.Z` commit sitting on `main` with no tag leaves crates.io on the previous version, and nothing reports a failure, because no run happened. 0.3.2 was lost this way.
+
+```bash
+# 1. Bump Cargo.toml, let the lockfile catch up, commit both.
+cargo check
+git commit -am "Release X.Y.Z"
+git push origin main
+
+# 2. Tag that commit and push the tag. This is the step that publishes.
+git tag -a vX.Y.Z -m "Ditto CLI X.Y.Z"
+git push origin vX.Y.Z
+```
+
+The workflow checks the tag against `cargo metadata`'s version and stops if they disagree, runs the suite on Linux, macOS and Windows, publishes with `cargo publish --locked`, builds the per-platform binaries, and updates the Homebrew tap. Confirm the release landed rather than assuming the push was enough:
+
+```bash
+gh run list --workflow=publish.yml --limit 1
+curl -s https://crates.io/api/v1/crates/ditto-cli | jq -r .crate.max_version
+```
+
+`workflow_dispatch` re-runs a release from an existing tag, which is how to retry one whose publish succeeded but whose later jobs did not: the publish job asks the registry directly and skips a version already there. The tap job is the one step that checks out `main` rather than the tag, so a fix to the rendering tooling reaches a tag cut before that fix existed.

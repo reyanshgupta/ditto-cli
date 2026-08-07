@@ -131,7 +131,7 @@ ditto-cli update --check   # compare versions without installing
 ditto-cli update --git     # install from the Git repository instead
 ```
 
-`update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release. Asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
+`update` runs `cargo install` for you, so it needs Rust on your `PATH`. It stops early when you already have the newest release. During a build it shows a compact animated status instead of Cargo's full compilation log; if the build fails, it prints that log so the error is not hidden. Asking crates.io for the published version needs a network connection; without one it says so and installs anyway.
 
 `update` only replaces a copy in Cargo's own bin directory. Run it against a Homebrew install, or a binary from the [releases page](https://github.com/reyanshgupta/ditto-cli/releases), and it says so before it starts, then leaves that copy alone: a `cargo install` would land in a different directory and shadow the existing binary rather than replace it. Use `brew upgrade ditto-cli` or the newer archive instead.
 

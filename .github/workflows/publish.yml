@@ -329,20 +329,26 @@ jobs:
       - name: Check out the release tooling
         uses: actions/checkout@v7
 
+      # GitHub's Node image still carries npm 10, which cannot exchange the
+      # workflow's OIDC identity for an npm publishing token and falls through
+      # to a 2FA-protected account token instead. Trusted publishing arrived in
+      # 11.5.1, so the publisher supplies its own npm rather than depending on
+      # when the runner image catches up.
+      - name: Install npm with trusted publishing support
+        shell: bash
+        run: npm install --global 'npm@^11.5.1'
+
       # npm authenticates as this workflow rather than as a token: the packages
       # name `publish.yml` in this repository as their trusted publisher, and
       # the OIDC identity the runner mints is what proves it is really this
-      # file running. The npm the runner ships has to be new enough to ask,
-      # which is what this reports before anything depends on it.
+      # file running.
       - name: Report the npm that will publish
         shell: bash
         run: |
           echo "node $(node --version), npm $(npm --version)"
-          # Trusted publishing arrived in 11.5.1. An older npm falls back to the
-          # token below and publishes without provenance rather than failing, so
-          # this says so rather than stopping.
           if [[ "$(printf '%s\n11.5.1\n' "$(npm --version)" | sort -V | head -1)" != "11.5.1" ]]; then
-            echo "::warning::npm $(npm --version) predates trusted publishing; falling back to NPM_TOKEN"
+            echo "::error::npm $(npm --version) predates trusted publishing"
+            exit 1
           fi
 
       # The token is a fallback, not the mechanism. npm reaches for an OIDC

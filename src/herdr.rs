@@ -107,6 +107,7 @@ mod tests {
                 config: PathBuf::from("/profiles/work/opencode/config"),
                 state: PathBuf::from("/profiles/work/opencode/state"),
             },
+            prime_agent_home: PathBuf::from("/profiles/work/prime-agent"),
             managed: true,
         }
     }

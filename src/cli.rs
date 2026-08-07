@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "ditto-cli",
     version,
-    about = "Launch Claude Code, Codex, opencode, and OMP with isolated profiles"
+    about = "Launch Claude Code, Codex, opencode, OMP, and Prime Agent with isolated profiles"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -23,7 +23,7 @@ pub struct Cli {
 pub enum Command {
     /// List available profiles.
     List,
-    /// Show Claude Code, Codex, opencode, and OMP authentication status.
+    /// Show authentication status for every supported agent.
     Status {
         /// Profile name. Uses the last selected profile when omitted.
         profile: Option<String>,
@@ -48,7 +48,7 @@ pub enum Command {
     Default(DefaultArgs),
     /// Show or change the profile a directory launches with.
     Workspace(WorkspaceArgs),
-    /// Show the Claude, Codex, opencode, and OMP directories for a profile.
+    /// Show every supported agent directory for a profile.
     Paths {
         /// Profile name. Uses the last selected profile when omitted.
         profile: Option<String>,
@@ -64,6 +64,9 @@ pub enum Command {
     Opencode(LaunchArgs),
     /// Launch Oh My Pi.
     Omp(LaunchArgs),
+    /// Launch Prime Agent.
+    #[command(visible_alias = "pa")]
+    PrimeAgent(LaunchArgs),
     /// Print shell functions that route the tools' own names through Ditto.
     ShellInit(ShellInitArgs),
     /// Show or change the profile indicator Claude Code displays.
@@ -349,6 +352,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_prime_agent_launch_arguments() {
+        let cli = Cli::try_parse_from([
+            "ditto-cli",
+            "prime-agent",
+            "work",
+            "--",
+            "--model",
+            "claude-opus-4-1",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::PrimeAgent(LaunchArgs { profile, args }))
+                if profile.as_deref() == Some("work")
+                    && args == [
+                        OsString::from("--model"),
+                        OsString::from("claude-opus-4-1"),
+                    ]
+        ));
+    }
+
+    #[test]
     fn parses_short_launch_aliases() {
         let claude = Cli::try_parse_from(["ditto-cli", "cc", "work"]).unwrap();
         assert!(matches!(
@@ -370,6 +396,13 @@ mod tests {
             Some(Command::Opencode(LaunchArgs { profile, args }))
                 if profile.as_deref() == Some("work")
                     && args == [OsString::from("--model"), OsString::from("opus")]
+        ));
+
+        let prime_agent = Cli::try_parse_from(["ditto-cli", "pa", "work"]).unwrap();
+        assert!(matches!(
+            prime_agent.command,
+            Some(Command::PrimeAgent(LaunchArgs { profile, args }))
+                if profile.as_deref() == Some("work") && args.is_empty()
         ));
     }
 

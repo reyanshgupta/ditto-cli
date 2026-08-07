@@ -28,6 +28,7 @@ const CLAUDE_ORANGE: Color = Color::Rgb(222, 133, 93);
 const CODEX_GREEN: Color = Color::Rgb(104, 201, 154);
 const OPENCODE_CYAN: Color = Color::Rgb(103, 199, 209);
 const OMP_BLUE: Color = Color::Rgb(96, 165, 250);
+const PRIME_PURPLE: Color = Color::Rgb(168, 85, 247);
 
 /// Width reserved for the tool name so the status and path columns line up.
 const TOOL_COLUMN: usize = 13;
@@ -36,7 +37,7 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const TICK: Duration = Duration::from_millis(110);
 /// Below this the panes cannot show a usable amount of the profile.
 const MINIMUM_WIDTH: u16 = 60;
-const MINIMUM_HEIGHT: u16 = 20;
+const MINIMUM_HEIGHT: u16 = 22;
 /// The width at which every profile shortcut fits on one footer row.
 const WIDE_FOOTER_WIDTH: u16 = 88;
 /// Marks the profile that commands use when they omit a profile name.
@@ -54,11 +55,18 @@ const SIGN_OUT: Shortcut = ("L", "sign out", Color::Gray);
 const REFRESH: Shortcut = ("r", "refresh", Color::Gray);
 const QUIT: Shortcut = ("q", "quit", Color::Gray);
 
-const TOOL_SHORTCUTS: [Shortcut; 4] = [
+const TOOL_SHORTCUTS: [Shortcut; 5] = [
     ("c", "Claude Code", CLAUDE_ORANGE),
     ("x", "Codex", CODEX_GREEN),
     ("o", "opencode", OPENCODE_CYAN),
     ("p", "OMP", OMP_BLUE),
+    ("a", "Prime", PRIME_PURPLE),
+];
+const AUTH_SHORTCUTS: [Shortcut; 4] = [
+    ("c", "Claude Code", CLAUDE_ORANGE),
+    ("x", "Codex", CODEX_GREEN),
+    ("o", "opencode", OPENCODE_CYAN),
+    ("a", "Prime Agent", PRIME_PURPLE),
 ];
 const WIDE_SHORTCUT_ROW: [Shortcut; 8] = [
     SELECT, NEW, RENAME, DEFAULT, SIGN_IN, SIGN_OUT, REFRESH, QUIT,
@@ -112,6 +120,7 @@ struct ProfileAuth {
     codex: Option<AuthStatus>,
     opencode: Option<AuthStatus>,
     omp: Option<AuthStatus>,
+    prime_agent: Option<AuthStatus>,
 }
 
 impl ProfileAuth {
@@ -121,6 +130,7 @@ impl ProfileAuth {
             Tool::Codex => self.codex,
             Tool::Opencode => self.opencode,
             Tool::Omp => self.omp,
+            Tool::PrimeAgent => self.prime_agent,
         }
     }
 
@@ -130,6 +140,7 @@ impl ProfileAuth {
             Tool::Codex => self.codex = Some(status),
             Tool::Opencode => self.opencode = Some(status),
             Tool::Omp => self.omp = Some(status),
+            Tool::PrimeAgent => self.prime_agent = Some(status),
         }
     }
 
@@ -340,6 +351,7 @@ impl<'a> App<'a> {
                 KeyCode::Char('x') => Action::Launch(Tool::Codex),
                 KeyCode::Char('o') => Action::Launch(Tool::Opencode),
                 KeyCode::Char('p') => Action::Launch(Tool::Omp),
+                KeyCode::Char('a') => Action::Launch(Tool::PrimeAgent),
                 _ => Action::Continue,
             }),
             Mode::Creating { input, error } => match key.code {
@@ -437,6 +449,7 @@ impl<'a> App<'a> {
                     KeyCode::Char('c') => Tool::Claude,
                     KeyCode::Char('x') => Tool::Codex,
                     KeyCode::Char('o') => Tool::Opencode,
+                    KeyCode::Char('a') => Tool::PrimeAgent,
                     _ => return Ok(Action::Continue),
                 };
                 if operation == AuthOperation::Logout {
@@ -627,6 +640,7 @@ impl<'a> App<'a> {
                 Tool::Codex => profile.codex_home.clone(),
                 Tool::Opencode => profile.opencode.data_dir(),
                 Tool::Omp => profile.omp_home.clone(),
+                Tool::PrimeAgent => profile.prime_agent_home.clone(),
             };
             let path = shorten_home(&path, home);
             Line::from(vec![
@@ -736,14 +750,10 @@ impl<'a> App<'a> {
                         self.selected_profile().name
                     )),
                     Line::default(),
-                    shortcut_line(&[
-                        ("c", "Claude Code", CLAUDE_ORANGE),
-                        ("x", "Codex", CODEX_GREEN),
-                        ("o", "opencode", OPENCODE_CYAN),
-                    ]),
+                    shortcut_line(&AUTH_SHORTCUTS),
                     Line::default(),
                     // OMP is missing above on purpose: Ditto CLI can read its
-                    // sign-in state but has no command to change it.
+                    // sign-in state but has no command that changes it.
                     Line::styled(
                         "OMP signs in and out from its own prompt.",
                         Style::new().fg(Color::DarkGray),
@@ -753,7 +763,7 @@ impl<'a> App<'a> {
                 ];
                 render_popup(
                     frame,
-                    centered_rect(62, 10, area),
+                    centered_rect(90, 10, area),
                     &format!(" {} ", operation.label()),
                     lines,
                 );
@@ -865,6 +875,7 @@ fn tool_color(tool: Tool) -> Color {
         Tool::Codex => CODEX_GREEN,
         Tool::Opencode => OPENCODE_CYAN,
         Tool::Omp => OMP_BLUE,
+        Tool::PrimeAgent => PRIME_PURPLE,
     }
 }
 
@@ -978,14 +989,10 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn auth_environment_is_set() -> bool {
-    [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "OPENAI_API_KEY",
-        "OPENCODE_API_KEY",
-    ]
-    .iter()
-    .any(|name| env::var_os(name).is_some())
+    env::vars_os().any(|(name, _)| {
+        let name = name.to_string_lossy();
+        name.ends_with("_API_KEY") || matches!(name.as_ref(), "ANTHROPIC_AUTH_TOKEN" | "HF_TOKEN")
+    })
 }
 
 #[cfg(test)]
@@ -1014,6 +1021,10 @@ mod tests {
         }
         let tools = shortcut_line(&TOOL_SHORTCUTS).width() as u16 + 2;
         assert!(tools <= MINIMUM_WIDTH, "{tools} exceeds the narrow footer");
+
+        let auth = shortcut_line(&AUTH_SHORTCUTS).width() as u16 + 2;
+        let auth_popup = MINIMUM_WIDTH * 90 / 100;
+        assert!(auth <= auth_popup, "{auth} exceeds the sign-in dialog");
     }
 
     #[test]
@@ -1064,8 +1075,12 @@ mod tests {
         assert!(auth.pending());
 
         auth.set(Tool::Omp, AuthStatus::SignedOut);
+        assert!(auth.pending());
+
+        auth.set(Tool::PrimeAgent, AuthStatus::SignedIn);
         assert!(!auth.pending());
         assert_eq!(auth.get(Tool::Opencode), Some(AuthStatus::SignedIn));
         assert_eq!(auth.get(Tool::Omp), Some(AuthStatus::SignedOut));
+        assert_eq!(auth.get(Tool::PrimeAgent), Some(AuthStatus::SignedIn));
     }
 }

@@ -103,6 +103,9 @@ fn run(cli: Cli) -> Result<()> {
             launch_direct(&store, &workspaces, Tool::Opencode, arguments)
         }
         Some(Command::Omp(arguments)) => launch_direct(&store, &workspaces, Tool::Omp, arguments),
+        Some(Command::PrimeAgent(arguments)) => {
+            launch_direct(&store, &workspaces, Tool::PrimeAgent, arguments)
+        }
         Some(Command::ShellInit(arguments)) => print_shell_init(arguments),
         Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
         Some(Command::Statusline(arguments)) => {
@@ -294,6 +297,10 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
                 "opencode": format!("ditto-cli opencode {} -- auth login", profile.name),
                 "omp": format!("ditto-cli omp {} (then /login inside OMP)", profile.name),
+                "prime-agent": format!(
+                    "ditto-cli prime-agent {} -- /login",
+                    profile.name
+                ),
             });
             created
         },
@@ -590,6 +597,7 @@ fn show_paths(
                 profile.opencode.config_dir().display()
             );
             println!("omp={}", profile.omp_home.display());
+            println!("prime-agent={}", profile.prime_agent_home.display());
         },
     );
     Ok(())
@@ -606,6 +614,7 @@ fn profile_paths(profile: &Profile) -> Value {
         "opencode": profile.opencode.data_dir().display().to_string(),
         "opencode_config": profile.opencode.config_dir().display().to_string(),
         "omp": profile.omp_home.display().to_string(),
+        "prime_agent": profile.prime_agent_home.display().to_string(),
     })
 }
 
@@ -976,7 +985,7 @@ fn current_directory() -> Result<PathBuf> {
 fn print_login_instructions(profile: &Profile) {
     println!();
     println!(
-        "Open `ditto-cli`, select '{}', then press l to sign in.",
+        "Open `ditto-cli`, select '{}', then press l to sign in to Claude Code, Codex, opencode, or Prime Agent.",
         profile.name
     );
     println!();
@@ -984,7 +993,8 @@ fn print_login_instructions(profile: &Profile) {
     println!("  ditto-cli claude {} -- auth login", profile.name);
     println!("  ditto-cli codex {} -- login", profile.name);
     println!("  ditto-cli opencode {} -- auth login", profile.name);
+    println!("  ditto-cli prime-agent {} -- /login", profile.name);
     println!();
-    println!("Launch OMP, then use `/login` for each subscription provider:");
+    println!("Launch OMP, then use `/login` inside it:");
     println!("  ditto-cli omp {}", profile.name);
 }

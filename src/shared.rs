@@ -70,6 +70,25 @@ const CODEX: &[&str] = &[
 /// Its `agent.db` holds credentials beside sessions and never moves.
 const OMP: &[&str] = &["config.yml", "extensions"];
 
+/// Prime Agent's reusable capabilities and instructions, relative to its agent
+/// directory. `models.json` is absent because custom providers may put literal
+/// API keys and secret headers there; `auth.json` and all session state stay in
+/// the profile for the same reason.
+const PRIME_AGENT: &[&str] = &[
+    "settings.json",
+    "keybindings.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "SYSTEM.md",
+    "APPEND_SYSTEM.md",
+    "prompts",
+    "skills",
+    "extensions",
+    "themes",
+    "git",
+    "harness",
+];
+
 /// What linking did, so a caller can say so rather than leaving it to be
 /// noticed when a skill turns out to be missing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -177,6 +196,13 @@ fn plan(source: &Profile, target: &Profile) -> Vec<Borrowed> {
             label: format!("omp/{name}"),
             from: source.omp_home.join(name),
             into: target.omp_home.join(name),
+        });
+    }
+    for name in PRIME_AGENT {
+        plan.push(Borrowed {
+            label: format!("prime-agent/{name}"),
+            from: source.prime_agent_home.join(name),
+            into: target.prime_agent_home.join(name),
         });
     }
     plan
@@ -411,13 +437,40 @@ mod tests {
             "account.json",
             "agent.db",
             "state",
+            "session-artifacts",
+            "session-leases",
+            "cron-jobs.json",
+            "models.json",
         ];
         for name in account {
             assert!(
-                !CLAUDE.contains(&name) && !CODEX.contains(&name) && !OMP.contains(&name),
+                !CLAUDE.contains(&name)
+                    && !CODEX.contains(&name)
+                    && !OMP.contains(&name)
+                    && !PRIME_AGENT.contains(&name),
                 "'{name}' carries an account and must not be shared between profiles"
             );
         }
+    }
+
+    #[test]
+    fn a_prime_agent_profile_reads_the_global_harness() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(
+            &source.prime_agent_home.join("harness"),
+            "harness_state.json",
+        );
+
+        let target = store.create_profile("work").unwrap();
+        let linked = link(&source, &target, false).unwrap();
+
+        assert!(linked.linked.contains(&"prime-agent/harness".to_owned()));
+        assert_eq!(
+            fs::read_to_string(target.prime_agent_home.join("harness/harness_state.json")).unwrap(),
+            "yours"
+        );
     }
 
     /// Deleting a profile removes the links and never follows them out to the

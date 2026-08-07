@@ -1,5 +1,5 @@
 class DittoCli < Formula
-  desc "Switch between multiple Claude Code, Codex, opencode, and OMP accounts"
+  desc "Isolate Claude Code, Codex, opencode, OMP, and Prime Agent accounts"
   homepage "https://github.com/reyanshgupta/ditto-cli"
   license "MIT"
 

@@ -4,13 +4,13 @@ version = "0.3.3"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Reyansh Gupta"]
-description = "Switch between multiple Claude Code, Codex, opencode, and OMP accounts on one machine"
+description = "Switch between Claude Code, Codex, opencode, OMP, and Prime Agent accounts"
 license = "MIT"
 repository = "https://github.com/reyanshgupta/ditto-cli"
 homepage = "https://www.reyanshgupta.com/projects/ditto-cli"
 documentation = "https://github.com/reyanshgupta/ditto-cli#readme"
 readme = "README.md"
-keywords = ["claude-code", "codex", "opencode", "omp", "profiles"]
+keywords = ["claude-code", "codex", "opencode", "omp", "prime-agent"]
 categories = ["command-line-utilities"]
 
 # `cargo binstall` downloads the release archive rather than compiling, which

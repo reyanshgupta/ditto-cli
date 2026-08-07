@@ -1,6 +1,6 @@
 # Ditto CLI
 
-Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, opencode, and OMP profiles isolated. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
+Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, opencode, OMP, and Prime Agent profiles isolated. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
 
 This file is for agents and scripts. The first half is how to *drive* Ditto; the second half is how to *change* it. `CLAUDE.md` points here so there is one copy to keep true.
 
@@ -15,7 +15,7 @@ ditto-cli list --json
 ditto-cli --json list
 ```
 
-Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
+Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`, `prime-agent`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
 
 ### The config an agent can edit
 
@@ -42,6 +42,8 @@ A profile's own directories are the tools' config, not Ditto's. `ditto-cli paths
 claude_home=$(ditto-cli paths work --json | jq -r .claude)
 # then edit "$claude_home/settings.json", "$claude_home/.claude.json", etc.
 ```
+
+Prime Agent is pointed at a profile with `PRIME_AGENT_CODING_AGENT_DIR` and, for managed profiles, `PRIME_AGENT_SESSION_DIR`. Its ordinary provider logins live in the selected `auth.json`. Current Prime Agent releases keep Prime Inference's Prime CLI credential separately at `~/.prime/config.json` and expose no override for that path, so Prime Inference remains shared; inherited API-key environment variables are ambient too. Prime Agent's daemon socket is also user-wide, so its agent-list and attach commands can see running agents from other profiles even though each runtime receives its selected auth and session roots. Status reports only the provider entries in the profile's own `auth.json`, excluding MCP, trace-sharing, and web-search credentials.
 
 The one file Ditto also writes is `<claude_home>/settings.json`, on two occasions and no others. A launch installs the `statusLine` key; if that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it. Creating a profile copies the rest of `~/.claude/settings.json` into it, since `CLAUDE_CONFIG_DIR` moves the whole user settings layer and the profile would otherwise have no permission mode, model, or hooks. `ditto-cli sync <profile>` does the same copy on demand, filling in keys the profile has never set and leaving the ones it has unless `--overwrite` is passed. `statusLine` is the one key never copied: it names the profile it was installed for.
 
@@ -72,6 +74,7 @@ ditto-cli delete work --yes --json
 
 # Run a tool inside a profile. Everything after -- goes to that tool.
 ditto-cli claude work -- --model opus
+ditto-cli prime-agent work -- --model claude-opus-4-1
 ```
 
 `DITTO_HOME` relocates the whole store, which is what makes a hermetic run possible:
@@ -86,7 +89,7 @@ These strings are an interface. Changing one breaks callers, so treat it as a de
 
 | Field | Values |
 | --- | --- |
-| `tools[].tool` | `claude`, `codex`, `opencode`, `omp` |
+| `tools[].tool` | `claude`, `codex`, `opencode`, `omp`, `prime-agent` |
 | `tools[].status` | `signed_in`, `signed_out`, `unavailable` |
 | `indicator.outcome` | `installed`, `already_on`, `alongside`, `removed`, `restored`, `off`, `foreign`, `shadowed` |
 | `profiles[].managed` | `false` only for the reserved `default` profile |

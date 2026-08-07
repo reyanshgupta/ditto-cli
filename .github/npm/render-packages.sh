@@ -124,6 +124,7 @@ cat > "${wrapper}/package.json" <<JSON
     "codex",
     "opencode",
     "omp",
+    "prime-agent",
     "profiles",
     "cli"
   ],

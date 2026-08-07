@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    io,
+    fs, io,
     path::Path,
     process::{Command, Stdio},
     time::Duration,
@@ -22,11 +22,18 @@ pub enum Tool {
     Codex,
     Opencode,
     Omp,
+    PrimeAgent,
 }
 
 impl Tool {
     /// Every tool Ditto CLI can launch, in the order they are presented.
-    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Opencode, Self::Omp];
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Opencode,
+        Self::Omp,
+        Self::PrimeAgent,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -34,6 +41,7 @@ impl Tool {
             Self::Codex => "Codex",
             Self::Opencode => "opencode",
             Self::Omp => "OMP",
+            Self::PrimeAgent => "Prime Agent",
         }
     }
 
@@ -49,6 +57,7 @@ impl Tool {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Omp => "omp",
+            Self::PrimeAgent => "prime-agent",
         }
     }
 
@@ -58,12 +67,14 @@ impl Tool {
             Self::Codex => "DITTO_CODEX_BIN",
             Self::Opencode => "DITTO_OPENCODE_BIN",
             Self::Omp => "DITTO_OMP_BIN",
+            Self::PrimeAgent => "DITTO_PRIME_AGENT_BIN",
         };
         std::env::var_os(override_variable).unwrap_or_else(|| match self {
             Self::Claude => OsString::from("claude"),
             Self::Codex => OsString::from("codex"),
             Self::Opencode => OsString::from("opencode"),
             Self::Omp => OsString::from("omp"),
+            Self::PrimeAgent => OsString::from("prime-agent"),
         })
     }
 }
@@ -87,12 +98,16 @@ impl AuthOperation {
             (Self::Login, Tool::Claude) => Some(&["auth", "login"]),
             (Self::Login, Tool::Codex) => Some(&["login"]),
             (Self::Login, Tool::Opencode) => Some(&["auth", "login"]),
+            // Prime Agent treats an initial slash command exactly as if it was
+            // typed into the editor, so this opens the login dialog directly.
+            (Self::Login, Tool::PrimeAgent) => Some(&["/login"]),
             (Self::Logout, Tool::Claude) => Some(&["auth", "logout"]),
             (Self::Logout, Tool::Codex) => Some(&["logout"]),
             (Self::Logout, Tool::Opencode) => Some(&["auth", "logout"]),
-            // OMP authenticates from its own prompt and exposes no command for
-            // it. Its sign-in state is still readable, so it reports status
-            // without being signable in or out here.
+            (Self::Logout, Tool::PrimeAgent) => Some(&["/logout"]),
+            // OMP exposes no authentication command. Its sign-in state is
+            // still readable, so it reports status without being signable in
+            // or out here.
             (_, Tool::Omp) => None,
         }
     }
@@ -133,9 +148,10 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
         Tool::Claude => &["auth", "status", "--json"],
         Tool::Codex => &["login", "status"],
         Tool::Opencode => &["auth", "list"],
-        // OMP has no status command to ask. `/login` writes credentials into
-        // the profile's own database, so Ditto reads that instead.
+        // These tools have no status command to ask. Ditto reads the stores
+        // their in-app login flows write instead.
         Tool::Omp => return omp_auth_status(profile),
+        Tool::PrimeAgent => return prime_agent_auth_status(profile),
     };
 
     let output = base_command(tool, profile)
@@ -154,7 +170,9 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
             parse_codex_auth_status(output.status.success(), &output.stdout, &output.stderr)
         }
         Tool::Opencode => parse_opencode_auth_status(output.status.success(), &output.stdout),
-        Tool::Omp => unreachable!("OMP auth status returned before command execution"),
+        Tool::Omp | Tool::PrimeAgent => {
+            unreachable!("file-based auth status returned before command execution")
+        }
     }
 }
 
@@ -185,6 +203,32 @@ fn omp_credential_count(database: &Path) -> rusqlite::Result<i64> {
         [],
         |row| row.get(0),
     )
+}
+
+/// Prime Agent keeps provider logins beside credentials for optional services.
+/// MCP, trace sharing, and web search do not make a model available, so only a
+/// remaining entry counts as being signed in to the agent itself.
+fn prime_agent_auth_status(profile: &Profile) -> AuthStatus {
+    let auth = profile.prime_agent_home.join("auth.json");
+    let contents = match fs::read(&auth) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return AuthStatus::SignedOut,
+        Err(_) => return AuthStatus::Unavailable,
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) else {
+        return AuthStatus::Unavailable;
+    };
+    let Some(credentials) = value.as_object() else {
+        return AuthStatus::Unavailable;
+    };
+
+    if credentials.keys().any(|provider| {
+        !provider.starts_with("mcp:") && provider != "prime-agent-traces" && provider != "serper"
+    }) {
+        AuthStatus::SignedIn
+    } else {
+        AuthStatus::SignedOut
+    }
 }
 
 fn parse_claude_auth_status(stdout: &[u8]) -> AuthStatus {
@@ -262,7 +306,11 @@ fn strip_ansi(text: &str) -> String {
 
 pub fn authenticate(operation: AuthOperation, tool: Tool, profile: &Profile) -> Result<()> {
     let Some(args) = operation.args(tool) else {
-        bail!("OMP authentication is managed inside OMP with `/login` and `/logout`");
+        bail!(
+            "{} authentication is managed inside {} with `/login` and `/logout`",
+            tool.label(),
+            tool.label()
+        );
     };
 
     // Signing in is a conversation with the tool, browser round trip and all,
@@ -305,6 +353,19 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
                     .arg("--profile")
                     .arg(&profile.name)
                     .env("OMP_PROFILE", &profile.name);
+            }
+        }
+        Tool::PrimeAgent => {
+            command.env("PRIME_AGENT_CODING_AGENT_DIR", &profile.prime_agent_home);
+            if profile.managed {
+                // A session directory in the user's shared settings or shell
+                // would otherwise put transcripts from every account together.
+                command
+                    .env(
+                        "PRIME_AGENT_SESSION_DIR",
+                        profile.prime_agent_home.join("sessions"),
+                    )
+                    .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
             }
         }
     }
@@ -480,6 +541,7 @@ mod tests {
                 config: PathBuf::from("/profiles/work/opencode/config"),
                 state: PathBuf::from("/profiles/work/opencode/state"),
             },
+            prime_agent_home: PathBuf::from("/profiles/work/prime-agent"),
             managed: true,
         }
     }
@@ -539,6 +601,25 @@ mod tests {
     }
 
     #[test]
+    fn prime_agent_uses_isolated_config_and_session_directories() {
+        let command = build_command(Tool::PrimeAgent, &profile(), &[]);
+        let environment = command.get_envs().collect::<Vec<_>>();
+
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("PRIME_AGENT_CODING_AGENT_DIR"),
+            Some(std::ffi::OsStr::new("/profiles/work/prime-agent"))
+        )));
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("PRIME_AGENT_SESSION_DIR"),
+            Some(std::ffi::OsStr::new("/profiles/work/prime-agent/sessions"))
+        )));
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("PRIME_AGENT_CODING_AGENT_SESSION_DIR"),
+            None
+        )));
+    }
+
+    #[test]
     fn omp_uses_native_named_profile_and_exports_selection() {
         let command = build_command(
             Tool::Omp,
@@ -578,6 +659,14 @@ mod tests {
     }
 
     #[test]
+    fn stable_tool_keys_include_prime_agent() {
+        assert_eq!(
+            Tool::ALL.map(Tool::key),
+            ["claude", "codex", "opencode", "omp", "prime-agent"]
+        );
+    }
+
+    #[test]
     fn authentication_uses_native_cli_commands() {
         assert_eq!(
             AuthOperation::Login.args(Tool::Claude),
@@ -605,6 +694,47 @@ mod tests {
         );
         assert_eq!(AuthOperation::Login.args(Tool::Omp), None);
         assert_eq!(AuthOperation::Logout.args(Tool::Omp), None);
+        assert_eq!(
+            AuthOperation::Login.args(Tool::PrimeAgent),
+            Some(["/login"].as_slice())
+        );
+        assert_eq!(
+            AuthOperation::Logout.args(Tool::PrimeAgent),
+            Some(["/logout"].as_slice())
+        );
+    }
+
+    #[test]
+    fn reads_prime_agent_provider_credentials_without_counting_services() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile = profile();
+        profile.prime_agent_home = temporary.path().join("prime-agent");
+        fs::create_dir_all(&profile.prime_agent_home).unwrap();
+
+        assert_eq!(prime_agent_auth_status(&profile), AuthStatus::SignedOut);
+        fs::write(profile.prime_agent_home.join("auth.json"), "{}").unwrap();
+        assert_eq!(prime_agent_auth_status(&profile), AuthStatus::SignedOut);
+
+        fs::write(
+            profile.prime_agent_home.join("auth.json"),
+            r#"{
+                "mcp:notion": {"type": "oauth"},
+                "prime-agent-traces": {"type": "api_key"},
+                "serper": {"type": "api_key"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(prime_agent_auth_status(&profile), AuthStatus::SignedOut);
+
+        fs::write(
+            profile.prime_agent_home.join("auth.json"),
+            r#"{"anthropic":{"type":"oauth"}}"#,
+        )
+        .unwrap();
+        assert_eq!(prime_agent_auth_status(&profile), AuthStatus::SignedIn);
+
+        fs::write(profile.prime_agent_home.join("auth.json"), "not json").unwrap();
+        assert_eq!(prime_agent_auth_status(&profile), AuthStatus::Unavailable);
     }
 
     #[test]

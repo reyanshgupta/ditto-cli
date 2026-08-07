@@ -602,16 +602,18 @@ mod tests {
 
     #[test]
     fn prime_agent_uses_isolated_config_and_session_directories() {
-        let command = build_command(Tool::PrimeAgent, &profile(), &[]);
+        let profile = profile();
+        let expected_sessions = profile.prime_agent_home.join("sessions");
+        let command = build_command(Tool::PrimeAgent, &profile, &[]);
         let environment = command.get_envs().collect::<Vec<_>>();
 
         assert!(environment.contains(&(
             std::ffi::OsStr::new("PRIME_AGENT_CODING_AGENT_DIR"),
-            Some(std::ffi::OsStr::new("/profiles/work/prime-agent"))
+            Some(profile.prime_agent_home.as_os_str())
         )));
         assert!(environment.contains(&(
             std::ffi::OsStr::new("PRIME_AGENT_SESSION_DIR"),
-            Some(std::ffi::OsStr::new("/profiles/work/prime-agent/sessions"))
+            Some(expected_sessions.as_os_str())
         )));
         assert!(environment.contains(&(
             std::ffi::OsStr::new("PRIME_AGENT_CODING_AGENT_SESSION_DIR"),

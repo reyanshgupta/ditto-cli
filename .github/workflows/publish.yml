@@ -336,7 +336,9 @@ jobs:
       # when the runner image catches up.
       - name: Install npm with trusted publishing support
         shell: bash
-        run: npm install --global 'npm@^11.5.1'
+        run: |
+          npm install --global --prefix "${RUNNER_TEMP}/npm" 'npm@^11.5.1'
+          echo "${RUNNER_TEMP}/npm/bin" >> "${GITHUB_PATH}"
 
       # npm authenticates as this workflow rather than as a token: the packages
       # name `publish.yml` in this repository as their trusted publisher, and

@@ -334,6 +334,9 @@ fn sync_settings(
     let source = store.load_profile(DEFAULT_PROFILE)?;
     let copied = settings::copy(&source, &profile, arguments.overwrite)?;
     let linked = shared::link(&source, &profile, arguments.adopt)?;
+    // A launch repairs the tool it is about to start; asking for a sync is
+    // asking about the profile, so this answers for every tool at once.
+    let repaired = shared::repair(&profile);
 
     report(
         json,
@@ -350,7 +353,13 @@ fn sync_settings(
                     .iter()
                     .map(|(path, reason)| json!({ "path": path, "reason": reason }))
                     .collect::<Vec<_>>(),
-                "changed": copied.changed() || linked.changed(),
+                "repaired": repaired.links,
+                "repair_failed": repaired
+                    .failed
+                    .iter()
+                    .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+                    .collect::<Vec<_>>(),
+                "changed": copied.changed() || linked.changed() || repaired.changed(),
             })
         },
         || {
@@ -394,6 +403,15 @@ fn sync_settings(
             }
             for (path, reason) in &linked.failed {
                 println!("Could not share {path}: {reason}");
+            }
+            if !repaired.links.is_empty() {
+                println!(
+                    "Repaired links installed pointing at nothing: {}.",
+                    repaired.links.join(", ")
+                );
+            }
+            for (path, reason) in &repaired.failed {
+                println!("Could not repair {path}: {reason}");
             }
         },
     );

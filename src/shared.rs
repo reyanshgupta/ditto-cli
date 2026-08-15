@@ -20,15 +20,21 @@
 //! copied instead of linked, because Ditto writes the profile's status line
 //! into it and linking would mean writing that into the user's own file. See
 //! [`crate::settings`].
+//!
+//! Linking a directory has one cost, and [`repair`] is what pays it. See the
+//! comment there.
 
 use std::{
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 
-use crate::profile::{DEFAULT_PROFILE, Profile, Store};
+use crate::{
+    launch::Tool,
+    profile::{DEFAULT_PROFILE, Profile, Store},
+};
 
 /// Where a directory a profile already had is moved when the user asks Ditto to
 /// link over it, so `--adopt` can never be the command that lost something.
@@ -167,45 +173,224 @@ pub fn seed(store: &Store, profile: &Profile) -> Linked {
 /// Every path the target borrows from the source, in the order they are
 /// reported: one tool at a time, and the tools in the order they are listed
 /// everywhere else.
+///
+/// Both sides come from [`paths`] rather than being written out twice, so the
+/// two can only ever name the same list in the same order.
 fn plan(source: &Profile, target: &Profile) -> Vec<Borrowed> {
-    let mut plan = Vec::new();
+    paths(source)
+        .into_iter()
+        .zip(paths(target))
+        .map(|(borrowed, own)| Borrowed {
+            label: borrowed.label,
+            from: borrowed.path,
+            into: own.path,
+        })
+        .collect()
+}
+
+/// One path in the allowlist, as it is inside a single profile.
+struct Owned {
+    tool: Tool,
+    label: String,
+    path: PathBuf,
+}
+
+/// Every path in the allowlist as it is inside one profile: which tool reads
+/// it, the name it is reported by, and where it lives.
+fn paths(profile: &Profile) -> Vec<Owned> {
+    let mut paths = Vec::new();
     for name in CLAUDE {
-        plan.push(Borrowed {
+        paths.push(Owned {
+            tool: Tool::Claude,
             label: format!("claude/{name}"),
-            from: source.claude_home.join(name),
-            into: target.claude_home.join(name),
+            path: profile.claude_home.join(name),
         });
     }
     for name in CODEX {
-        plan.push(Borrowed {
+        paths.push(Owned {
+            tool: Tool::Codex,
             label: format!("codex/{name}"),
-            from: source.codex_home.join(name),
-            into: target.codex_home.join(name),
+            path: profile.codex_home.join(name),
         });
     }
     // opencode keeps configuration and credentials in different XDG bases
     // already, so the whole configuration directory can be shared as one link
     // and the data directory holding `auth.json` stays untouched.
-    plan.push(Borrowed {
+    paths.push(Owned {
+        tool: Tool::Opencode,
         label: "opencode/config".to_owned(),
-        from: source.opencode.config_dir(),
-        into: target.opencode.config_dir(),
+        path: profile.opencode.config_dir(),
     });
     for name in OMP {
-        plan.push(Borrowed {
+        paths.push(Owned {
+            tool: Tool::Omp,
             label: format!("omp/{name}"),
-            from: source.omp_home.join(name),
-            into: target.omp_home.join(name),
+            path: profile.omp_home.join(name),
         });
     }
     for name in PRIME_AGENT {
-        plan.push(Borrowed {
+        paths.push(Owned {
+            tool: Tool::PrimeAgent,
             label: format!("prime-agent/{name}"),
-            from: source.prime_agent_home.join(name),
-            into: target.prime_agent_home.join(name),
+            path: profile.prime_agent_home.join(name),
         });
     }
-    plan
+    paths
+}
+
+/// How deep a shared directory is searched for links to mend.
+///
+/// A tool writes into the directory it was handed, so the link is usually an
+/// entry of that directory. opencode is why this is not one: Ditto shares its
+/// whole configuration directory, which puts an installed skill three levels
+/// down at `opencode/skills/<name>`. Deeper than that is the tool's own
+/// storage — `claude/plugins` alone holds a git checkout per marketplace — and
+/// walking it at every launch would cost more than the repair is worth.
+const SEARCH_DEPTH: usize = 3;
+
+/// What repairing did, so a launch can say why something appeared.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Repaired {
+    /// Links now pointing where they were installed to point, named by their
+    /// path inside the profile.
+    pub links: Vec<String>,
+    /// Links that could not be rewritten, each with the reason.
+    pub failed: Vec<(String, String)>,
+}
+
+impl Repaired {
+    pub fn changed(&self) -> bool {
+        !self.links.is_empty()
+    }
+}
+
+/// Points links a tool wrote through one of Ditto's back at what they meant.
+///
+/// Sharing a directory by linking it has one cost. A tool is handed a
+/// configuration directory whose `skills` is a link to the user's own, and an
+/// installer that puts something there and records it as a *relative* link
+/// computes that link from the path it was given. The kernel then creates the
+/// link in the directory the link leads to, which sits at a different depth, so
+/// the relative path lands on nothing. That is what a skill installer does, and
+/// it is why a downloaded skill can be missing from every profile at once while
+/// the skill itself is on disk and perfectly fine.
+///
+/// Ditto is what moved the directory, so Ditto is what can say where the link
+/// meant to go: read its target from the path the tool was handed rather than
+/// from where the link ended up. Nothing is rewritten unless reading it that way
+/// names something that exists, so a link that is relative and broken for its
+/// own reasons is reported by nobody and left alone.
+pub fn repair(profile: &Profile) -> Repaired {
+    mend(paths(profile))
+}
+
+/// The same for one tool, which is all a launch of that tool can be about to
+/// read.
+pub fn repair_for(tool: Tool, profile: &Profile) -> Repaired {
+    mend(
+        paths(profile)
+            .into_iter()
+            .filter(|owned| owned.tool == tool),
+    )
+}
+
+fn mend(paths: impl IntoIterator<Item = Owned>) -> Repaired {
+    let mut result = Repaired::default();
+    for owned in paths {
+        // Only a directory Ditto redirected can hold one of these. Where the
+        // profile kept its own, the path a tool was handed is the path it wrote
+        // to, and a relative link resolves the way its author meant.
+        if fs::symlink_metadata(&owned.path).is_ok_and(|entry| entry.is_symlink()) {
+            search(&owned.label, &owned.path, SEARCH_DEPTH, &mut result);
+        }
+    }
+    result
+}
+
+/// Walks a shared directory by the path the profile knows it as, which is the
+/// path a tool was given and the only one its relative links can be read
+/// against.
+fn search(label: &str, directory: &Path, depth: usize, result: &mut Repaired) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        let label = format!("{label}/{}", entry.file_name().to_string_lossy());
+        if kind.is_symlink() {
+            let Some(meant) = intended(&path) else {
+                continue;
+            };
+            match relink(&path, &meant) {
+                Ok(()) => result.links.push(label),
+                Err(error) => result.failed.push((label, format!("{error:#}"))),
+            }
+        } else if kind.is_dir() && depth > 1 {
+            search(&label, &path, depth - 1, result);
+        }
+    }
+}
+
+/// Where a link was meant to point, if it is one of the links this repairs.
+fn intended(link: &Path) -> Option<PathBuf> {
+    let target = fs::read_link(link).ok()?;
+    // An absolute link says where it goes and got there whatever Ditto did, so
+    // one that leads nowhere is broken for a reason of its own.
+    if target.is_absolute() {
+        return None;
+    }
+    // `exists` follows the link from where it really is, which is the reading
+    // that failed. A link that survives it means what it says.
+    if link.exists() {
+        return None;
+    }
+    let meant = resolve(&link.parent()?.join(target));
+    meant.exists().then_some(meant)
+}
+
+/// Resolves `.` and `..` without asking the filesystem.
+///
+/// `canonicalize` is the wrong tool here: it follows the very link that moved
+/// the directory, and would answer with where the link *is* rather than where
+/// the tool believed it was writing. That difference is the whole repair.
+fn resolve(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            // A `..` with nothing left to remove is the tool climbing past the
+            // root, which is exactly how the broken link got there. Staying at
+            // the root matches what the kernel does with the same path.
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            component => resolved.push(component),
+        }
+    }
+    resolved
+}
+
+/// Rewrites the link as an absolute one, so it reads the same from the profile
+/// and from the user's own configuration and cannot break again the next time a
+/// profile is added.
+fn relink(link: &Path, target: &Path) -> Result<()> {
+    remove_link(link).with_context(|| format!("could not replace {}", link.display()))?;
+    symlink(target, link)
+}
+
+#[cfg(unix)]
+fn remove_link(link: &Path) -> io::Result<()> {
+    fs::remove_file(link)
+}
+
+/// Windows records whether a link was made to a file or to a directory and
+/// refuses `remove_file` for the directory kind, so both have to be offered.
+#[cfg(windows)]
+fn remove_link(link: &Path) -> io::Result<()> {
+    fs::remove_file(link).or_else(|_| fs::remove_dir(link))
 }
 
 enum Outcome {
@@ -318,6 +503,31 @@ mod tests {
     fn given_directory(path: &Path, file: &str) {
         fs::create_dir_all(path).unwrap();
         fs::write(path.join(file), "yours").unwrap();
+    }
+
+    /// The path `to` is written as from `from`, which is what an installer
+    /// computes before recording where it put something.
+    fn relative(from: &Path, to: &Path) -> PathBuf {
+        let mut from = from.components().peekable();
+        let mut to = to.components().peekable();
+        while from.peek().is_some() && from.peek() == to.peek() {
+            from.next();
+            to.next();
+        }
+
+        let mut relative = PathBuf::new();
+        for _ in from {
+            relative.push("..");
+        }
+        relative.extend(to);
+        relative
+    }
+
+    /// Records an installed skill the way a skill installer does: a relative
+    /// link, computed from the directory the tool was handed rather than from
+    /// the directory that link leads to.
+    fn installed_through(handed: &Path, name: &str, skill: &Path) {
+        symlink(&relative(handed, skill), &handed.join(name)).unwrap();
     }
 
     #[test]
@@ -470,6 +680,173 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.prime_agent_home.join("harness/harness_state.json")).unwrap(),
             "yours"
+        );
+    }
+
+    /// The failure [`repair`] exists for. An installer puts the skill in one
+    /// place and records it in the directory Ditto handed the tool as a link
+    /// computed from that path; the kernel writes the link into the user's own
+    /// directory instead, where the same path leads somewhere else entirely.
+    #[test]
+    fn a_link_installed_through_ours_is_pointed_back_at_the_skill() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.claude_home.join("skills"), "yours.md");
+        let skill = temporary.path().join("home/.agents/skills/apple-design");
+        given_directory(&skill, "SKILL.md");
+
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let handed = target.claude_home.join("skills");
+        installed_through(&handed, "apple-design", &skill);
+        assert!(!handed.join("apple-design").exists());
+
+        let repaired = repair(&target);
+
+        assert!(repaired.changed());
+        assert_eq!(repaired.links, ["claude/skills/apple-design"]);
+        assert_eq!(
+            fs::read_to_string(handed.join("apple-design/SKILL.md")).unwrap(),
+            "yours"
+        );
+        // The link really is in the user's own configuration, which is where
+        // every other profile and an unproxied tool will read it from.
+        assert!(
+            source
+                .claude_home
+                .join("skills/apple-design/SKILL.md")
+                .exists()
+        );
+    }
+
+    /// opencode has no directory of its own for extensions, so Ditto shares the
+    /// whole configuration directory and an installed skill lands below the
+    /// link rather than inside it.
+    #[test]
+    fn repairs_a_link_written_below_the_directory_a_tool_was_given() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.opencode.config_dir(), "opencode.json");
+        let skill = temporary.path().join("home/.agents/skills/apple-design");
+        given_directory(&skill, "SKILL.md");
+
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let handed = target.opencode.config_dir().join("skills");
+        fs::create_dir_all(&handed).unwrap();
+        installed_through(&handed, "apple-design", &skill);
+
+        let repaired = repair(&target);
+
+        assert_eq!(repaired.links, ["opencode/config/skills/apple-design"]);
+        assert!(handed.join("apple-design/SKILL.md").exists());
+    }
+
+    #[test]
+    fn repairs_only_the_tool_a_launch_is_about_to_start() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.claude_home.join("skills"), "yours.md");
+        given_directory(&source.codex_home.join("skills"), "yours.md");
+        let skill = temporary.path().join("home/.agents/skills/apple-design");
+        given_directory(&skill, "SKILL.md");
+
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let claude = target.claude_home.join("skills");
+        let codex = target.codex_home.join("skills");
+        installed_through(&claude, "apple-design", &skill);
+        installed_through(&codex, "apple-design", &skill);
+
+        let repaired = repair_for(Tool::Codex, &target);
+
+        assert_eq!(repaired.links, ["codex/skills/apple-design"]);
+        assert!(codex.join("apple-design").exists());
+        assert!(!claude.join("apple-design").exists());
+    }
+
+    /// A link that reads correctly means what it says, wherever its author
+    /// computed it from, and rewriting one would be Ditto tidying somebody
+    /// else's configuration for them.
+    #[test]
+    fn leaves_a_link_that_already_reads_correctly_alone() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        let skills = source.claude_home.join("skills");
+        given_directory(&skills, "yours.md");
+        let skill = temporary.path().join("home/.agents/skills/apple-design");
+        given_directory(&skill, "SKILL.md");
+        // Written from the user's own directory, which is what an installer run
+        // outside Ditto produces.
+        installed_through(&skills, "apple-design", &skill);
+
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let repaired = repair(&target);
+
+        assert!(!repaired.changed());
+        assert_eq!(
+            fs::read_link(skills.join("apple-design")).unwrap(),
+            relative(&skills, &skill)
+        );
+    }
+
+    #[test]
+    fn leaves_broken_links_it_did_not_cause_alone() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.claude_home.join("skills"), "yours.md");
+
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let handed = target.claude_home.join("skills");
+        // An absolute link says where it goes and got there whatever Ditto did.
+        symlink(Path::new("/nowhere/at/all"), &handed.join("absolute")).unwrap();
+        // A relative one that leads nowhere from the profile either was not
+        // written against the path Ditto handed out.
+        symlink(Path::new("../../nowhere"), &handed.join("relative")).unwrap();
+
+        let repaired = repair(&target);
+
+        assert!(!repaired.changed());
+        assert!(repaired.failed.is_empty());
+        assert_eq!(
+            fs::read_link(handed.join("absolute")).unwrap(),
+            Path::new("/nowhere/at/all")
+        );
+        assert_eq!(
+            fs::read_link(handed.join("relative")).unwrap(),
+            Path::new("../../nowhere")
+        );
+    }
+
+    /// Where the profile kept a directory of its own, the path a tool was handed
+    /// is the path it wrote to, so nothing there was computed against a link and
+    /// nothing there is Ditto's to rewrite.
+    #[test]
+    fn leaves_a_directory_the_profile_owns_alone() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.claude_home.join("skills"), "yours.md");
+        let skill = temporary.path().join("home/.agents/skills/apple-design");
+        given_directory(&skill, "SKILL.md");
+
+        let target = store.create_profile("work").unwrap();
+        let handed = target.claude_home.join("skills");
+        given_directory(&handed, "theirs.md");
+        link(&source, &target, false).unwrap();
+        symlink(Path::new("../../nowhere"), &handed.join("apple-design")).unwrap();
+
+        assert!(!repair(&target).changed());
+        assert_eq!(
+            fs::read_link(handed.join("apple-design")).unwrap(),
+            Path::new("../../nowhere")
         );
     }
 

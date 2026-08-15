@@ -51,6 +51,8 @@ The one file Ditto also writes is `<claude_home>/settings.json`, on two occasion
 
 Claude Code reads settings from several files and the profile's is the lowest-ranking of them, so an entry can be installed and never drawn. `Indicator::shadowed` says so, and is applied where a person is being told what happened rather than during a launch, since the answer depends on the directory the command was typed in.
 
+The other thing a launch writes is a repair, and it is the one case where Ditto rewrites something a tool wrote. A skill installer records what it installed as a *relative* symbolic link computed from the configuration directory the tool was pointed at; under a profile that directory is one of `shared.rs`'s links, so the operating system creates the record in the user's own directory instead and the relative path in it now leads somewhere else. The skill is on disk and readable from nowhere. `shared::repair_for` re-reads such a link against the path the installer was handed and, only when that names something that exists, rewrites it as an absolute link — reported on stderr at launch, and under `repaired` by `sync`, which does every tool rather than the one being started.
+
 ### Recipes
 
 ```bash
@@ -59,7 +61,8 @@ ditto-cli create work --json
 ditto-cli default work --json
 
 # Bring a profile's Claude Code settings up to the user's own. `copied` names
-# the keys written, `kept` the ones the profile had already answered.
+# the keys written, `kept` the ones the profile had already answered, and
+# `repaired` the installed links that were pointing at nothing.
 ditto-cli sync work --json
 
 # Which profiles exist, and which would a bare command use?
@@ -110,7 +113,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
-| `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — and the linking itself. |
+| `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
 | `herdr.rs` | Reading `HERDR_PANE_ID`, and reporting the profile to herdr as pane metadata. Why the proxy is skipped inside a herdr pane. |

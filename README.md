@@ -502,6 +502,20 @@ ditto-cli sync client-a           # link what can be linked, report what cannot
 ditto-cli sync client-a --adopt   # replace the profile's own copies too
 ```
 
+### Downloaded skills
+
+Sharing a directory by linking it has one cost, and Ditto CLI pays it for you.
+
+A skill installer — `npx skills add`, and anything else that installs into more than one agent — puts the skill somewhere central and then records it in each agent's skills directory as a *relative* link, computed from the directory the agent was pointed at. Under a profile that directory is one of the links above, so the operating system writes the record into your own configuration instead, where the same relative path leads somewhere else. The skill lands on disk intact and is readable from nowhere, in every profile at once.
+
+Ditto CLI is what moved the directory, so Ditto CLI is what can say where those links meant to point. Launching a tool repairs its own, which is the moment before it reads them, and says so:
+
+```
+ditto-cli: repaired claude/skills/apple-design; it was installed pointing at nothing
+```
+
+`ditto-cli sync <profile>` does the same for every tool at once and reports them under `repaired`. A link is only rewritten when reading it against the path the installer was given names something that exists, so a link that is relative and broken for reasons of its own is left exactly as it is.
+
 ## Where credentials and files are stored
 
 Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs, and OMP and Prime Agent authentication through `/login` inside their interfaces. Each tool stores the result wherever it normally would, under the directory Ditto CLI pointed it at:

@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
-use crate::{indicator, profile::Profile, program};
+use crate::{indicator, profile::Profile, program, shared};
 
 /// OMP's per-profile store. It holds credentials alongside sessions and
 /// settings, so it lives inside the profile's agent directory.
@@ -408,6 +408,24 @@ fn proxy_wanted() -> bool {
         && std::io::stdout().is_terminal()
 }
 
+/// Mends the links an installer wrote through the ones Ditto shares with, and
+/// says so.
+///
+/// A launch is the moment for it: every tool reads its skills and extensions
+/// when it starts, so a skill installed during the last session is repaired
+/// before the first read that would have missed it. Saying so on stderr is the
+/// difference between a skill appearing and Ditto rewriting the user's links
+/// behind their back. See [`shared::repair`] for what goes wrong without it.
+fn repair_shared_links(tool: Tool, profile: &Profile) {
+    let repaired = shared::repair_for(tool, profile);
+    for link in &repaired.links {
+        eprintln!("ditto-cli: repaired {link}; it was installed pointing at nothing");
+    }
+    for (link, reason) in &repaired.failed {
+        eprintln!("ditto-cli: could not repair {link}: {reason}");
+    }
+}
+
 /// Says plainly when a tool is not installed. The operating system reports that
 /// as a missing file, which reads as a fault in Ditto rather than as a CLI the
 /// user has yet to install.
@@ -484,6 +502,7 @@ unsafe extern "system" fn ignore_interrupt(event: u32) -> windows_sys::core::BOO
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
+    repair_shared_links(tool, profile);
     if tool == Tool::Claude {
         indicator::enable_quietly(profile);
     }
@@ -512,6 +531,7 @@ pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
 /// sees what it would have seen had it run the tool itself.
 #[cfg(not(unix))]
 pub fn launch(tool: Tool, profile: &Profile, args: &[OsString]) -> Result<()> {
+    repair_shared_links(tool, profile);
     show_profile(tool, profile);
 
     let interrupts = Interrupts::leave_to_tool();

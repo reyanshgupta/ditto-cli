@@ -10,7 +10,11 @@ use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
-use crate::{indicator, profile::Profile, program, shared};
+use crate::{
+    indicator,
+    profile::{LAUNCHED_TOOL_VARIABLE, NATIVE_ENVIRONMENT, Profile},
+    program, shared,
+};
 
 /// OMP's per-profile store. It holds credentials alongside sessions and
 /// settings, so it lives inside the profile's agent directory.
@@ -349,7 +353,10 @@ pub fn authenticate(operation: AuthOperation, tool: Tool, profile: &Profile) -> 
 
 fn base_command(tool: Tool, profile: &Profile) -> Command {
     let mut command = Command::new(program::resolve(&tool.executable()));
-    command.env("DITTO_PROFILE", &profile.name);
+    preserve_native_environment(&mut command);
+    command
+        .env("DITTO_PROFILE", &profile.name)
+        .env(LAUNCHED_TOOL_VARIABLE, tool.key());
     match tool {
         Tool::Claude => {
             command.env("CLAUDE_CONFIG_DIR", &profile.claude_home);
@@ -398,6 +405,26 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
         }
     }
     command
+}
+
+/// Carries the roots from before Ditto redirected any tool into every child.
+/// A tool can invoke Ditto again through a shell command, and without these
+/// copies that nested process would mistake the active account's isolated
+/// directories for the user's own configuration.
+fn preserve_native_environment(command: &mut Command) {
+    // An existing profile marker means an outer Ditto already had the only
+    // unmodified view. Its saved values are inherited automatically; filling a
+    // missing one now would preserve a directory the outer process redirected.
+    if std::env::var_os("DITTO_PROFILE").is_some() {
+        return;
+    }
+    for (variable, preserved) in NATIVE_ENVIRONMENT {
+        if std::env::var_os(preserved).is_none()
+            && let Some(value) = std::env::var_os(variable)
+        {
+            command.env(preserved, value);
+        }
+    }
 }
 
 /// Set to step out of the way and hand the terminal straight to the tool. The
@@ -724,6 +751,17 @@ mod tests {
 
         assert_eq!(command.get_args().next(), None);
         assert_eq!(omp_profile, Some(None));
+    }
+
+    #[test]
+    fn launched_tools_mark_the_environment_as_redirected() {
+        let command = build_command(Tool::Pi, &profile(), &[]);
+        let launched_tool = command
+            .get_envs()
+            .find(|(name, _)| *name == LAUNCHED_TOOL_VARIABLE)
+            .and_then(|(_, value)| value);
+
+        assert_eq!(launched_tool, Some(std::ffi::OsStr::new("pi")));
     }
 
     #[test]

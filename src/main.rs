@@ -1,5 +1,6 @@
 mod cli;
 mod herdr;
+mod history;
 mod indicator;
 mod launch;
 mod profile;
@@ -304,6 +305,10 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
                 ),
                 "pi": format!("ditto-cli pi {} (then /login inside Pi)", profile.name),
             });
+            created["preserve_history"] = json!({
+                "this_profile": format!("ditto-cli sync {} --history", profile.name),
+                "all_profiles": "ditto-cli sync --all --history",
+            });
             created
         },
         || {
@@ -317,6 +322,11 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             if !linked.linked.is_empty() {
                 println!("Reading yours for: {}.", linked.linked.join(", "));
             }
+            println!(
+                "Preserve existing chats in this profile with `ditto-cli sync {} \
+                 --history`, or in every profile with `ditto-cli sync --all --history`.",
+                profile.name
+            );
             print_login_instructions(&profile);
         },
     );
@@ -332,92 +342,199 @@ fn sync_settings(
     arguments: SyncArgs,
     json: bool,
 ) -> Result<()> {
-    let (profile, _) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
     let source = store.load_profile(DEFAULT_PROFILE)?;
-    let copied = settings::copy(&source, &profile, arguments.overwrite)?;
-    let linked = shared::link(&source, &profile, arguments.adopt)?;
+    let profiles = if arguments.all {
+        store
+            .list_profiles()?
+            .into_iter()
+            .filter(|profile| profile.managed)
+            .collect::<Vec<_>>()
+    } else {
+        vec![resolve_profile(store, workspaces, arguments.profile.as_deref())?.0]
+    };
+    let outcomes = profiles
+        .into_iter()
+        .map(|profile| {
+            sync_profile(
+                store,
+                &source,
+                profile,
+                arguments.overwrite,
+                arguments.adopt,
+                arguments.history,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if arguments.all {
+        report(
+            json,
+            || {
+                json!({
+                    "profiles": outcomes.iter().map(sync_payload).collect::<Vec<_>>(),
+                    "changed": outcomes.iter().any(SyncOutcome::changed),
+                })
+            },
+            || {
+                for outcome in &outcomes {
+                    print_sync(outcome);
+                }
+            },
+        );
+    } else {
+        let outcome = &outcomes[0];
+        report(json, || sync_payload(outcome), || print_sync(outcome));
+    }
+    Ok(())
+}
+
+struct SyncOutcome {
+    profile: String,
+    copied: settings::Copied,
+    linked: shared::Linked,
+    repaired: shared::Repaired,
+    history: Option<history::Backfilled>,
+}
+
+impl SyncOutcome {
+    fn changed(&self) -> bool {
+        self.copied.changed()
+            || self.linked.changed()
+            || self.repaired.changed()
+            || self
+                .history
+                .as_ref()
+                .is_some_and(history::Backfilled::changed)
+    }
+}
+
+fn sync_profile(
+    store: &Store,
+    source: &Profile,
+    profile: Profile,
+    overwrite: bool,
+    adopt: bool,
+    backfill_history: bool,
+) -> Result<SyncOutcome> {
+    store.ensure_profile_directories(&profile)?;
+    let copied = settings::copy(source, &profile, overwrite)?;
+    let linked = shared::link(source, &profile, adopt)?;
     // A launch repairs the tool it is about to start; asking for a sync is
     // asking about the profile, so this answers for every tool at once.
     let repaired = shared::repair(&profile);
+    let history = backfill_history
+        .then(|| history::backfill(source, &profile))
+        .transpose()?;
 
-    report(
-        json,
-        || {
-            json!({
-                "profile": profile.name,
-                "source": source.name,
-                "copied": copied.copied,
-                "kept": copied.kept,
-                "shared": linked.linked,
-                "shared_kept": linked.kept,
-                "shared_failed": linked
-                    .failed
-                    .iter()
-                    .map(|(path, reason)| json!({ "path": path, "reason": reason }))
-                    .collect::<Vec<_>>(),
-                "repaired": repaired.links,
-                "repair_failed": repaired
-                    .failed
-                    .iter()
-                    .map(|(path, reason)| json!({ "path": path, "reason": reason }))
-                    .collect::<Vec<_>>(),
-                "changed": copied.changed() || linked.changed() || repaired.changed(),
-            })
-        },
-        || {
-            if copied.changed() {
-                println!(
-                    "Copied into '{}': {}.",
-                    profile.name,
-                    copied.copied.join(", ")
-                );
-            } else {
-                println!(
-                    "'{}' already has every setting your own configuration sets.",
-                    profile.name
-                );
-            }
-            if !copied.kept.is_empty() {
-                println!(
-                    "Left '{}' as it is for: {}.",
-                    profile.name,
-                    copied.kept.join(", ")
-                );
-                println!(
-                    "  Replace those too with `ditto-cli sync {} --overwrite`.",
-                    profile.name
-                );
-            }
-            if !linked.linked.is_empty() {
-                println!("Reading yours for: {}.", linked.linked.join(", "));
-            }
-            if !linked.kept.is_empty() {
-                println!(
-                    "'{}' has its own and keeps it: {}.",
-                    profile.name,
-                    linked.kept.join(", ")
-                );
-                println!(
-                    "  Point those at yours too with `ditto-cli sync {} --adopt`, \
-                     which moves what is there aside rather than deleting it.",
-                    profile.name
-                );
-            }
-            for (path, reason) in &linked.failed {
-                println!("Could not share {path}: {reason}");
-            }
-            if !repaired.links.is_empty() {
-                println!(
-                    "Repaired links installed pointing at nothing: {}.",
-                    repaired.links.join(", ")
-                );
-            }
-            for (path, reason) in &repaired.failed {
-                println!("Could not repair {path}: {reason}");
-            }
-        },
-    );
-    Ok(())
+    Ok(SyncOutcome {
+        profile: profile.name,
+        copied,
+        linked,
+        repaired,
+        history,
+    })
+}
+
+fn sync_payload(outcome: &SyncOutcome) -> Value {
+    let mut payload = json!({
+        "profile": outcome.profile,
+        "source": DEFAULT_PROFILE,
+        "copied": outcome.copied.copied,
+        "kept": outcome.copied.kept,
+        "shared": outcome.linked.linked,
+        "shared_kept": outcome.linked.kept,
+        "shared_failed": outcome
+            .linked
+            .failed
+            .iter()
+            .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+            .collect::<Vec<_>>(),
+        "repaired": outcome.repaired.links,
+        "repair_failed": outcome
+            .repaired
+            .failed
+            .iter()
+            .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+            .collect::<Vec<_>>(),
+        "changed": outcome.changed(),
+    });
+    if let Some(history) = &outcome.history {
+        payload["history"] = json!(
+            history
+                .tools
+                .iter()
+                .map(|(tool, counts)| (
+                    tool.key().to_owned(),
+                    json!({ "copied": counts.copied, "kept": counts.kept })
+                ))
+                .collect::<serde_json::Map<_, _>>()
+        );
+    }
+    payload
+}
+
+fn print_sync(outcome: &SyncOutcome) {
+    if outcome.copied.changed() {
+        println!(
+            "Copied into '{}': {}.",
+            outcome.profile,
+            outcome.copied.copied.join(", ")
+        );
+    } else {
+        println!(
+            "'{}' already has every setting your own configuration sets.",
+            outcome.profile
+        );
+    }
+    if !outcome.copied.kept.is_empty() {
+        println!(
+            "Left '{}' as it is for: {}.",
+            outcome.profile,
+            outcome.copied.kept.join(", ")
+        );
+        println!(
+            "  Replace those too with `ditto-cli sync {} --overwrite`.",
+            outcome.profile
+        );
+    }
+    if !outcome.linked.linked.is_empty() {
+        println!("Reading yours for: {}.", outcome.linked.linked.join(", "));
+    }
+    if !outcome.linked.kept.is_empty() {
+        println!(
+            "'{}' has its own and keeps it: {}.",
+            outcome.profile,
+            outcome.linked.kept.join(", ")
+        );
+        println!(
+            "  Point those at yours too with `ditto-cli sync {} --adopt`, \
+             which moves what is there aside rather than deleting it.",
+            outcome.profile
+        );
+    }
+    for (path, reason) in &outcome.linked.failed {
+        println!("Could not share {path}: {reason}");
+    }
+    if !outcome.repaired.links.is_empty() {
+        println!(
+            "Repaired links installed pointing at nothing: {}.",
+            outcome.repaired.links.join(", ")
+        );
+    }
+    for (path, reason) in &outcome.repaired.failed {
+        println!("Could not repair {path}: {reason}");
+    }
+    if let Some(history) = &outcome.history {
+        for (tool, counts) in &history.tools {
+            println!(
+                "Backfilled {} {} history files or sessions into '{}'; kept {} already there.",
+                counts.copied,
+                tool.label(),
+                outcome.profile,
+                counts.kept
+            );
+        }
+    }
 }
 
 /// Claude Code stores its credentials against the directory it was pointed at,

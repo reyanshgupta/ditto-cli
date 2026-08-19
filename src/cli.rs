@@ -42,7 +42,7 @@ pub enum Command {
     },
     /// Delete an isolated profile and everything inside it.
     Delete(DeleteArgs),
-    /// Copy your own Claude Code settings into an isolated profile.
+    /// Preserve reusable configuration for one or all isolated profiles.
     Sync(SyncArgs),
     /// Show, pin, or release the profile commands use when none is named.
     Default(DefaultArgs),
@@ -156,8 +156,18 @@ pub struct DeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct SyncArgs {
-    /// Profile to copy into. Uses the saved profile when omitted.
+    /// Profile to preserve configuration for. Choose this or `--all`.
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
     pub profile: Option<String>,
+    /// Preserve configuration for every managed profile instead of one.
+    #[arg(long)]
+    pub all: bool,
+    /// Copy existing conversations for every tool into the target profile(s).
+    ///
+    /// Existing files and sessions are kept. The copies then remain isolated,
+    /// so later conversations under one account do not appear under another.
+    #[arg(long, visible_alias = "pi-history")]
+    pub history: bool,
     /// Replace the settings this profile has already answered for itself.
     ///
     /// Without it a profile keeps every setting it has changed, which is what
@@ -299,14 +309,20 @@ mod tests {
                 if profile.as_deref() == Some("work") && !overwrite
         ));
 
-        let bare = Cli::try_parse_from(["ditto-cli", "sync", "--overwrite"]).unwrap();
+        assert!(Cli::try_parse_from(["ditto-cli", "sync", "--overwrite"]).is_err());
+
+        let all =
+            Cli::try_parse_from(["ditto-cli", "sync", "--all", "--history", "--adopt"]).unwrap();
         assert!(matches!(
-            bare.command,
+            all.command,
             Some(Command::Sync(SyncArgs {
-                profile, overwrite, ..
+                all: true,
+                history: true,
+                adopt: true,
+                ..
             }))
-                if profile.is_none() && overwrite
         ));
+        assert!(Cli::try_parse_from(["ditto-cli", "sync", "work", "--all"]).is_err());
     }
 
     #[test]

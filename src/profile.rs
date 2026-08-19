@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process,
 };
@@ -10,6 +12,24 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PROFILE: &str = "default";
 const MAX_PROFILE_NAME_LEN: usize = 32;
+
+/// Marks an environment as one Ditto redirected. A nested Ditto command must
+/// recover the user's original roots rather than treating the selected
+/// profile's roots as the `default` profile.
+pub(crate) const LAUNCHED_TOOL_VARIABLE: &str = "DITTO_LAUNCHED_TOOL";
+
+/// The variables Ditto redirects whose ambient values define part of the
+/// `default` profile, paired with private copies carried into launched tools.
+pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 5] = [
+    ("XDG_DATA_HOME", "DITTO_NATIVE_XDG_DATA_HOME"),
+    ("XDG_CONFIG_HOME", "DITTO_NATIVE_XDG_CONFIG_HOME"),
+    ("XDG_STATE_HOME", "DITTO_NATIVE_XDG_STATE_HOME"),
+    (
+        "PRIME_AGENT_CODING_AGENT_DIR",
+        "DITTO_NATIVE_PRIME_AGENT_CODING_AGENT_DIR",
+    ),
+    ("PI_CODING_AGENT_DIR", "DITTO_NATIVE_PI_CODING_AGENT_DIR"),
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
@@ -60,28 +80,19 @@ impl OpencodeHome {
             state: user_home.join(".local").join("state"),
         }
     }
-
-    fn from_environment(user_home: &Path) -> Self {
-        let native = Self::native(user_home);
-        Self {
-            data: xdg_base("XDG_DATA_HOME", native.data),
-            config: xdg_base("XDG_CONFIG_HOME", native.config),
-            state: xdg_base("XDG_STATE_HOME", native.state),
-        }
-    }
 }
 
 /// The XDG specification requires relative base paths to be ignored, which is
 /// what opencode does too.
-fn xdg_base(variable: &str, fallback: PathBuf) -> PathBuf {
-    env::var_os(variable)
+fn xdg_base(value: Option<OsString>, fallback: PathBuf) -> PathBuf {
+    value
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or(fallback)
 }
 
-fn configured_home(variable: &str, user_home: &Path, fallback: PathBuf) -> PathBuf {
-    env::var_os(variable)
+fn configured_home(value: Option<OsString>, user_home: &Path, fallback: PathBuf) -> PathBuf {
+    value
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .map(|configured| {
@@ -94,6 +105,83 @@ fn configured_home(variable: &str, user_home: &Path, fallback: PathBuf) -> PathB
             }
         })
         .unwrap_or(fallback)
+}
+
+/// Resolves roots that Ditto itself may have overwritten in a parent process.
+///
+/// New launches carry the original values under private names. The path check
+/// also recognizes children of older Ditto releases, which had only
+/// `DITTO_PROFILE` and would otherwise make an upgrade unable to repair the
+/// profile it was running inside.
+fn native_homes(
+    user_home: &Path,
+    root: &Path,
+    variable: impl Fn(&str) -> Option<OsString>,
+) -> (OpencodeHome, PathBuf, PathBuf) {
+    let launched = variable(LAUNCHED_TOOL_VARIABLE).is_some();
+    let selected = variable("DITTO_PROFILE")
+        .filter(|profile| profile != DEFAULT_PROFILE)
+        .map(|profile| root.join("profiles").join(profile));
+
+    let original = |name: &str, preserved: &str, suffix: &Path| {
+        if let Some(value) = variable(preserved) {
+            return Some(value);
+        }
+        let value = variable(name)?;
+        let redirected = launched
+            || selected
+                .as_ref()
+                .is_some_and(|profile| Path::new(&value) == profile.join(suffix));
+        (!redirected).then_some(value)
+    };
+
+    let opencode_fallback = OpencodeHome::native(user_home);
+    let native_opencode = OpencodeHome {
+        data: xdg_base(
+            original(
+                NATIVE_ENVIRONMENT[0].0,
+                NATIVE_ENVIRONMENT[0].1,
+                Path::new("opencode/data"),
+            ),
+            opencode_fallback.data,
+        ),
+        config: xdg_base(
+            original(
+                NATIVE_ENVIRONMENT[1].0,
+                NATIVE_ENVIRONMENT[1].1,
+                Path::new("opencode/config"),
+            ),
+            opencode_fallback.config,
+        ),
+        state: xdg_base(
+            original(
+                NATIVE_ENVIRONMENT[2].0,
+                NATIVE_ENVIRONMENT[2].1,
+                Path::new("opencode/state"),
+            ),
+            opencode_fallback.state,
+        ),
+    };
+    let native_prime_agent = configured_home(
+        original(
+            NATIVE_ENVIRONMENT[3].0,
+            NATIVE_ENVIRONMENT[3].1,
+            Path::new("prime-agent"),
+        ),
+        user_home,
+        user_home.join(".prime").join("agent"),
+    );
+    let native_pi = configured_home(
+        original(
+            NATIVE_ENVIRONMENT[4].0,
+            NATIVE_ENVIRONMENT[4].1,
+            Path::new("pi"),
+        ),
+        user_home,
+        user_home.join(".pi").join("agent"),
+    );
+
+    (native_opencode, native_pi, native_prime_agent)
 }
 
 #[derive(Clone, Debug)]
@@ -165,17 +253,8 @@ impl Store {
             .map(PathBuf::from)
             .unwrap_or_else(|| user_home.join(".ditto"));
 
-        let native_opencode = OpencodeHome::from_environment(&user_home);
-        let native_pi = configured_home(
-            "PI_CODING_AGENT_DIR",
-            &user_home,
-            user_home.join(".pi").join("agent"),
-        );
-        let native_prime_agent = configured_home(
-            "PRIME_AGENT_CODING_AGENT_DIR",
-            &user_home,
-            user_home.join(".prime").join("agent"),
-        );
+        let (native_opencode, native_pi, native_prime_agent) =
+            native_homes(&user_home, &root, |name| env::var_os(name));
         Ok(Self {
             root,
             user_home,
@@ -247,28 +326,9 @@ impl Store {
         fs::create_dir(&profile_root)
             .with_context(|| format!("profile '{name}' already exists or could not be created"))?;
 
-        // Parents come before children so every level is created and locked
-        // down before the CLIs get a chance to write credentials into it.
-        let opencode_root = self.opencode_root(name);
-        let directories = [
-            profile.claude_home.as_path(),
-            profile.codex_home.as_path(),
-            opencode_root.as_path(),
-            profile.opencode.data.as_path(),
-            profile.opencode.config.as_path(),
-            profile.opencode.state.as_path(),
-            profile.pi_home.as_path(),
-            profile.prime_agent_home.as_path(),
-        ];
-
         let result = (|| {
             secure_directory(&profile_root)?;
-            for directory in directories {
-                fs::create_dir(directory)
-                    .with_context(|| format!("could not create {}", directory.display()))?;
-                secure_directory(directory)?;
-            }
-            Ok(())
+            self.ensure_profile_directories(&profile)
         })();
 
         if let Err(error) = result {
@@ -423,6 +483,38 @@ impl Store {
             bail!("profile '{name}' does not exist; create it with `ditto-cli create {name}`");
         }
         Ok(profile)
+    }
+
+    /// Adds tool roots introduced after a profile was created. Syncing is the
+    /// explicit migration point; reporting commands must not mutate a profile
+    /// merely because they inspected it.
+    pub fn ensure_profile_directories(&self, profile: &Profile) -> Result<()> {
+        if !profile.managed {
+            return Ok(());
+        }
+
+        // Parents come before children so every level is locked down before a
+        // CLI gets a chance to put credentials in it.
+        let opencode_root = self.opencode_root(&profile.name);
+        let omp_root = self.omp_profile_root(&profile.name);
+        let directories = [
+            profile.claude_home.as_path(),
+            profile.codex_home.as_path(),
+            opencode_root.as_path(),
+            profile.opencode.data.as_path(),
+            profile.opencode.config.as_path(),
+            profile.opencode.state.as_path(),
+            omp_root.as_path(),
+            profile.omp_home.as_path(),
+            profile.pi_home.as_path(),
+            profile.prime_agent_home.as_path(),
+        ];
+        for directory in directories {
+            fs::create_dir_all(directory)
+                .with_context(|| format!("could not create {}", directory.display()))?;
+            secure_directory(directory)?;
+        }
+        Ok(())
     }
 
     pub fn last_profile(&self) -> Result<Option<String>> {
@@ -597,6 +689,10 @@ fn is_reserved_device_name(stem: &str) -> bool {
 /// settings file behind for a tool to refuse to start from, and the temporary
 /// carries the process id so two copies of Ditto cannot land on each other.
 pub fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    write_private_bytes(path, contents.as_bytes())
+}
+
+pub(crate) fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -645,7 +741,7 @@ fn replace(temporary: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn secure_directory(path: &Path) -> Result<()> {
+pub(crate) fn secure_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -656,7 +752,7 @@ fn secure_directory(path: &Path) -> Result<()> {
 /// which the system already restricts to that user, so the inherited access
 /// control is what stands in for the mode set above.
 #[cfg(not(unix))]
-fn secure_directory(_path: &Path) -> Result<()> {
+pub(crate) fn secure_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -718,6 +814,76 @@ mod tests {
     }
 
     #[test]
+    fn does_not_mistake_a_launched_profile_for_the_native_roots() {
+        let home = std::env::temp_dir().join("ditto-native-home");
+        let root = home.join(".ditto");
+        let profile = root.join("profiles/work");
+        let values = std::collections::HashMap::from([
+            ("DITTO_PROFILE", OsString::from("work")),
+            (
+                "XDG_DATA_HOME",
+                profile.join("opencode/data").into_os_string(),
+            ),
+            (
+                "XDG_CONFIG_HOME",
+                profile.join("opencode/config").into_os_string(),
+            ),
+            (
+                "XDG_STATE_HOME",
+                profile.join("opencode/state").into_os_string(),
+            ),
+            (
+                "PRIME_AGENT_CODING_AGENT_DIR",
+                profile.join("prime-agent").into_os_string(),
+            ),
+            ("PI_CODING_AGENT_DIR", profile.join("pi").into_os_string()),
+        ]);
+
+        let (opencode, pi, prime_agent) =
+            native_homes(&home, &root, |name| values.get(name).cloned());
+
+        assert_eq!(opencode, OpencodeHome::native(&home));
+        assert_eq!(pi, home.join(".pi/agent"));
+        assert_eq!(prime_agent, home.join(".prime/agent"));
+    }
+
+    #[test]
+    fn carries_custom_native_roots_through_a_launched_tool() {
+        let home = std::env::temp_dir().join("ditto-native-home");
+        let root = home.join(".ditto");
+        let custom = std::env::temp_dir().join("ditto-custom-opencode");
+        let values = std::collections::HashMap::from([
+            (LAUNCHED_TOOL_VARIABLE, OsString::from("pi")),
+            (
+                "DITTO_NATIVE_XDG_DATA_HOME",
+                custom.join("data").into_os_string(),
+            ),
+            (
+                "DITTO_NATIVE_XDG_CONFIG_HOME",
+                custom.join("config").into_os_string(),
+            ),
+            (
+                "DITTO_NATIVE_XDG_STATE_HOME",
+                custom.join("state").into_os_string(),
+            ),
+            (
+                "DITTO_NATIVE_PRIME_AGENT_CODING_AGENT_DIR",
+                OsString::from("~/prime"),
+            ),
+            ("DITTO_NATIVE_PI_CODING_AGENT_DIR", OsString::from("~/pi")),
+        ]);
+
+        let (opencode, pi, prime_agent) =
+            native_homes(&home, &root, |name| values.get(name).cloned());
+
+        assert_eq!(opencode.data, custom.join("data"));
+        assert_eq!(opencode.config, custom.join("config"));
+        assert_eq!(opencode.state, custom.join("state"));
+        assert_eq!(pi, home.join("pi"));
+        assert_eq!(prime_agent, home.join("prime"));
+    }
+
+    #[test]
     fn creates_and_remembers_an_isolated_profile() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let store = Store::new(
@@ -731,6 +897,7 @@ mod tests {
         assert!(profile.opencode.data.is_dir());
         assert!(profile.opencode.config.is_dir());
         assert!(profile.opencode.state.is_dir());
+        assert!(profile.omp_home.is_dir());
         assert!(profile.pi_home.is_dir());
         assert!(profile.prime_agent_home.is_dir());
         assert!(store.create_profile("work").is_err());
@@ -777,6 +944,24 @@ mod tests {
         );
         assert_eq!(default.pi_home, home.join(".pi").join("agent"));
         assert_eq!(default.prime_agent_home, home.join(".prime").join("agent"));
+        Ok(())
+    }
+
+    #[test]
+    fn provisions_tool_roots_added_after_a_profile_was_created() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::new(
+            temporary.path().join("ditto"),
+            temporary.path().join("home"),
+        );
+        fs::create_dir_all(store.profile_root("old"))?;
+        let profile = store.load_profile("old")?;
+
+        store.ensure_profile_directories(&profile)?;
+
+        assert!(profile.omp_home.is_dir());
+        assert!(profile.pi_home.is_dir());
+        assert!(profile.prime_agent_home.is_dir());
         Ok(())
     }
 

@@ -194,7 +194,9 @@ ditto-cli delete work --yes   # removes credentials and sessions for good
 ditto-cli list
 ditto-cli status client-a     # sign-in state for all six tools
 ditto-cli paths client-a
-ditto-cli sync client-a       # re-copy your Claude Code settings into it
+ditto-cli sync client-a       # preserve configuration for one profile
+ditto-cli sync --all          # preserve it for every managed profile
+ditto-cli sync --all --history # also backfill existing conversations
 
 # Launch a tool, with short aliases where shown
 ditto-cli claude client-a     # or: cc
@@ -461,7 +463,7 @@ ditto-cli --json status client-a
 }
 ```
 
-`list`, `status`, `paths`, `create`, `rename`, `delete`, `default`, `workspace`, and `indicator` all answer in JSON. Errors become `{"error": "..."}` on stderr, and every failure exits 1. `shell-init` prints a script for a shell to read rather than a report, so `--json` has nothing to do there.
+`list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator` all answer in JSON. Errors become `{"error": "..."}` on stderr, and every failure exits 1. `shell-init` prints a script for a shell to read rather than a report, so `--json` has nothing to do there.
 
 Running `ditto-cli` with no subcommand opens the picker, which needs an interactive terminal. Without one it exits 1 and names the commands to use instead, rather than failing on a terminal that was never there.
 
@@ -481,11 +483,12 @@ So creating a profile copies `~/.claude/settings.json` into it. What Ditto CLI i
 From then on the profile's settings are its own. Change the model in one profile and the others keep theirs; a later `ditto-cli sync` fills in settings the profile has never answered and leaves the ones it has:
 
 ```bash
-ditto-cli sync client-a              # bring it up to date, keeping its own answers
+ditto-cli sync client-a              # bring one profile up to date
+ditto-cli sync --all                 # bring every managed profile up to date
 ditto-cli sync client-a --overwrite  # your configuration wins outright
 ```
 
-`sync` is also how profiles created before this behaviour existed catch up.
+Naming a profile preserves configuration for that profile only; `--all` makes the scope every managed profile. `sync` is also how profiles created before this behaviour existed catch up, including tool directories added by a newer Ditto release.
 
 ## Skills, subagents, and everything else you set up once
 
@@ -502,12 +505,22 @@ A profile exists to be signed in as somebody else, not to be a different working
 
 These are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync and no copies to drift apart. Everything else — `.claude.json`, `auth.json`, sessions, session artifacts, history, `agent.db` — stays inside the profile, which is the whole of what a profile keeps to itself. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
 
+Conversation history is not linked: chats can contain account- or client-specific work, and shared writable session stores would make every profile's future activity visible to every other profile. Existing Claude Code, Codex, opencode, OMP, Prime Agent, and Pi conversations can instead be copied once, without replacing anything already in the destination. Choose one profile explicitly or all managed profiles explicitly:
+
+```bash
+ditto-cli sync client-a --history
+ditto-cli sync --all --history
+```
+
+After the copy, every tool keeps writing to that profile's own history store.
+
 What is shared is a named list rather than everything-but-the-credentials. Ditto CLI learning about a new extension directory late costs you a missing feature; sharing a new credential file by accident would cost you the isolation the tool exists for.
 
 Profiles created before this have real directories where the links go. `sync` reports those and leaves them alone; `--adopt` points them at yours, moving what was there aside as `<name>.before-ditto` rather than deleting it:
 
 ```bash
 ditto-cli sync client-a           # link what can be linked, report what cannot
+ditto-cli sync --all              # do that for every managed profile
 ditto-cli sync client-a --adopt   # replace the profile's own copies too
 ```
 

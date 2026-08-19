@@ -34,7 +34,7 @@ ditto-cli default work           # pin 'work'
 ditto-cli default --clear        # release it
 ```
 
-Precedence when a command omits the profile name: the directory's binding (see `workspace`), then `default_profile`, then `last_profile`, then the reserved `default` profile. `list --json` reports the saved values plus `fallback_profile`, which is the answer that precedence produces — read that instead of re-deriving the rule. A launch that reaches the saved values says so on stderr, naming the profile and which value chose it; the reporting commands stay quiet.
+Precedence when a command omits the profile name: the directory's binding (see `workspace`), then `default_profile`, then `last_profile`, then the reserved `default` profile. `sync` deliberately requires either one profile name or `--all`, because preserving configuration or copying history needs an explicit scope. `list --json` reports the saved values plus `fallback_profile`, which is the answer that precedence produces — read that instead of re-deriving the rule. A launch that reaches the saved values says so on stderr, naming the profile and which value chose it; the reporting commands stay quiet.
 
 A profile's own directories are the tools' config, not Ditto's. `ditto-cli paths <profile> --json` gives you the roots; edit files under them with ordinary tools:
 
@@ -46,6 +46,8 @@ claude_home=$(ditto-cli paths work --json | jq -r .claude)
 Prime Agent is pointed at a profile with `PRIME_AGENT_CODING_AGENT_DIR` and, for managed profiles, `PRIME_AGENT_SESSION_DIR`. Its ordinary provider logins live in the selected `auth.json`. Current Prime Agent releases keep Prime Inference's Prime CLI credential separately at `~/.prime/config.json` and expose no override for that path, so Prime Inference remains shared; inherited API-key environment variables are ambient too. Prime Agent's daemon socket is also user-wide, so its agent-list and attach commands can see running agents from other profiles even though each runtime receives its selected auth and session roots. Status reports only the provider entries in the profile's own `auth.json`, excluding MCP, trace-sharing, and web-search credentials.
 
 Pi is pointed at a profile with `PI_CODING_AGENT_DIR` and, for managed profiles, `PI_CODING_AGENT_SESSION_DIR`. Provider logins live in the selected `auth.json`; reusable settings, packages, skills, extensions, prompts, themes, trust decisions, and managed tools link back to the user's own Pi directory. `models.json` stays private because it may contain credentials. Pi has no standalone login command, so launch it and use `/login` or `/logout` inside its interface. Status counts entries in the profile's isolated `auth.json`; inherited API-key variables remain ambient.
+
+Conversation history stays private for every tool. `sync <profile> --history` copies existing default-profile conversations once without replacing the target's, while `sync --all --history` makes that explicit choice for every managed profile. File-backed tools merge missing files; opencode uses its own export/import commands because its SQLite database also contains credentials. Never link session directories or databases across profiles.
 
 The one file Ditto also writes is `<claude_home>/settings.json`, on two occasions and no others. A launch installs the `statusLine` key; if that key holds something Ditto did not write, Ditto reports `foreign` and leaves it alone rather than replacing it. Creating a profile copies the rest of `~/.claude/settings.json` into it, since `CLAUDE_CONFIG_DIR` moves the whole user settings layer and the profile would otherwise have no permission mode, model, or hooks. `ditto-cli sync <profile>` does the same copy on demand, filling in keys the profile has never set and leaving the ones it has unless `--overwrite` is passed. `statusLine` is the one key never copied: it names the profile it was installed for.
 
@@ -62,10 +64,14 @@ The other thing a launch writes is a repair, and it is the one case where Ditto 
 ditto-cli create work --json
 ditto-cli default work --json
 
-# Bring a profile's Claude Code settings up to the user's own. `copied` names
-# the keys written, `kept` the ones the profile had already answered, and
-# `repaired` the installed links that were pointing at nothing.
+# Bring one profile's reusable configuration up to the user's own. `copied`
+# names Claude Code keys written, `kept` the ones the profile had already
+# answered, and `repaired` the installed links that were pointing at nothing.
 ditto-cli sync work --json
+
+# Or choose every managed profile, and copy every tool's existing conversations
+# into each without linking their future histories together.
+ditto-cli sync --all --history --json
 
 # Which profiles exist, and which would a bare command use?
 ditto-cli list --json | jq '{fallback: .fallback_profile, names: [.profiles[].name]}'
@@ -117,6 +123,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
+| `history.rs` | One-time conversation backfills for every tool. File stores copy only missing files; opencode sessions cross through its export/import commands so credentials never do. |
 | `ui.rs` | The Ratatui picker. |
 | `proxy.rs` | The Unix pseudoterminal that rewrites title sequences on their way out. `#[cfg(unix)]`. |
 | `herdr.rs` | Reading `HERDR_PANE_ID`, and reporting the profile to herdr as pane metadata. Why the proxy is skipped inside a herdr pane. |

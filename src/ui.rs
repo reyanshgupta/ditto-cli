@@ -36,8 +36,8 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// How long the loop waits for input before looking for finished probes.
 const TICK: Duration = Duration::from_millis(110);
 /// Below this the panes cannot show a usable amount of the profile.
-const MINIMUM_WIDTH: u16 = 60;
-const MINIMUM_HEIGHT: u16 = 22;
+const MINIMUM_WIDTH: u16 = 68;
+const MINIMUM_HEIGHT: u16 = 24;
 /// The width at which every profile shortcut fits on one footer row.
 const WIDE_FOOTER_WIDTH: u16 = 88;
 /// Marks the profile that commands use when they omit a profile name.
@@ -55,12 +55,13 @@ const SIGN_OUT: Shortcut = ("L", "sign out", Color::Gray);
 const REFRESH: Shortcut = ("r", "refresh", Color::Gray);
 const QUIT: Shortcut = ("q", "quit", Color::Gray);
 
-const TOOL_SHORTCUTS: [Shortcut; 5] = [
+const TOOL_SHORTCUTS: [Shortcut; 6] = [
     ("c", "Claude Code", CLAUDE_ORANGE),
     ("x", "Codex", CODEX_GREEN),
     ("o", "opencode", OPENCODE_CYAN),
     ("p", "OMP", OMP_BLUE),
     ("a", "Prime", PRIME_PURPLE),
+    ("i", "Pi", DITTO_PURPLE),
 ];
 const AUTH_SHORTCUTS: [Shortcut; 4] = [
     ("c", "Claude Code", CLAUDE_ORANGE),
@@ -121,6 +122,7 @@ struct ProfileAuth {
     opencode: Option<AuthStatus>,
     omp: Option<AuthStatus>,
     prime_agent: Option<AuthStatus>,
+    pi: Option<AuthStatus>,
 }
 
 impl ProfileAuth {
@@ -131,6 +133,7 @@ impl ProfileAuth {
             Tool::Opencode => self.opencode,
             Tool::Omp => self.omp,
             Tool::PrimeAgent => self.prime_agent,
+            Tool::Pi => self.pi,
         }
     }
 
@@ -141,6 +144,7 @@ impl ProfileAuth {
             Tool::Opencode => self.opencode = Some(status),
             Tool::Omp => self.omp = Some(status),
             Tool::PrimeAgent => self.prime_agent = Some(status),
+            Tool::Pi => self.pi = Some(status),
         }
     }
 
@@ -352,6 +356,7 @@ impl<'a> App<'a> {
                 KeyCode::Char('o') => Action::Launch(Tool::Opencode),
                 KeyCode::Char('p') => Action::Launch(Tool::Omp),
                 KeyCode::Char('a') => Action::Launch(Tool::PrimeAgent),
+                KeyCode::Char('i') => Action::Launch(Tool::Pi),
                 _ => Action::Continue,
             }),
             Mode::Creating { input, error } => match key.code {
@@ -641,6 +646,7 @@ impl<'a> App<'a> {
                 Tool::Opencode => profile.opencode.data_dir(),
                 Tool::Omp => profile.omp_home.clone(),
                 Tool::PrimeAgent => profile.prime_agent_home.clone(),
+                Tool::Pi => profile.pi_home.clone(),
             };
             let path = shorten_home(&path, home);
             Line::from(vec![
@@ -752,10 +758,10 @@ impl<'a> App<'a> {
                     Line::default(),
                     shortcut_line(&AUTH_SHORTCUTS),
                     Line::default(),
-                    // OMP is missing above on purpose: Ditto CLI can read its
-                    // sign-in state but has no command that changes it.
+                    // OMP and Pi are missing above on purpose: Ditto CLI can
+                    // read their sign-in state but cannot open their commands.
                     Line::styled(
-                        "OMP signs in and out from its own prompt.",
+                        "OMP and Pi sign in and out from their own prompts.",
                         Style::new().fg(Color::DarkGray),
                     ),
                     Line::default(),
@@ -876,6 +882,7 @@ fn tool_color(tool: Tool) -> Color {
         Tool::Opencode => OPENCODE_CYAN,
         Tool::Omp => OMP_BLUE,
         Tool::PrimeAgent => PRIME_PURPLE,
+        Tool::Pi => DITTO_PURPLE,
     }
 }
 
@@ -1078,9 +1085,13 @@ mod tests {
         assert!(auth.pending());
 
         auth.set(Tool::PrimeAgent, AuthStatus::SignedIn);
+        assert!(auth.pending());
+
+        auth.set(Tool::Pi, AuthStatus::SignedOut);
         assert!(!auth.pending());
         assert_eq!(auth.get(Tool::Opencode), Some(AuthStatus::SignedIn));
         assert_eq!(auth.get(Tool::Omp), Some(AuthStatus::SignedOut));
         assert_eq!(auth.get(Tool::PrimeAgent), Some(AuthStatus::SignedIn));
+        assert_eq!(auth.get(Tool::Pi), Some(AuthStatus::SignedOut));
     }
 }

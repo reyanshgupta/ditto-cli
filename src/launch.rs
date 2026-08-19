@@ -23,16 +23,18 @@ pub enum Tool {
     Opencode,
     Omp,
     PrimeAgent,
+    Pi,
 }
 
 impl Tool {
     /// Every tool Ditto CLI can launch, in the order they are presented.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::Opencode,
         Self::Omp,
         Self::PrimeAgent,
+        Self::Pi,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +44,7 @@ impl Tool {
             Self::Opencode => "opencode",
             Self::Omp => "OMP",
             Self::PrimeAgent => "Prime Agent",
+            Self::Pi => "Pi",
         }
     }
 
@@ -58,6 +61,7 @@ impl Tool {
             Self::Opencode => "opencode",
             Self::Omp => "omp",
             Self::PrimeAgent => "prime-agent",
+            Self::Pi => "pi",
         }
     }
 
@@ -68,6 +72,7 @@ impl Tool {
             Self::Opencode => "DITTO_OPENCODE_BIN",
             Self::Omp => "DITTO_OMP_BIN",
             Self::PrimeAgent => "DITTO_PRIME_AGENT_BIN",
+            Self::Pi => "DITTO_PI_BIN",
         };
         std::env::var_os(override_variable).unwrap_or_else(|| match self {
             Self::Claude => OsString::from("claude"),
@@ -75,6 +80,7 @@ impl Tool {
             Self::Opencode => OsString::from("opencode"),
             Self::Omp => OsString::from("omp"),
             Self::PrimeAgent => OsString::from("prime-agent"),
+            Self::Pi => OsString::from("pi"),
         })
     }
 }
@@ -105,10 +111,10 @@ impl AuthOperation {
             (Self::Logout, Tool::Codex) => Some(&["logout"]),
             (Self::Logout, Tool::Opencode) => Some(&["auth", "logout"]),
             (Self::Logout, Tool::PrimeAgent) => Some(&["/logout"]),
-            // OMP exposes no authentication command. Its sign-in state is
-            // still readable, so it reports status without being signable in
-            // or out here.
-            (_, Tool::Omp) => None,
+            // OMP and Pi expose authentication only inside their interfaces.
+            // Their sign-in state is still readable, so they report status
+            // without being signable in or out here.
+            (_, Tool::Omp | Tool::Pi) => None,
         }
     }
 }
@@ -152,6 +158,7 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
         // their in-app login flows write instead.
         Tool::Omp => return omp_auth_status(profile),
         Tool::PrimeAgent => return prime_agent_auth_status(profile),
+        Tool::Pi => return pi_auth_status(profile),
     };
 
     let output = base_command(tool, profile)
@@ -170,7 +177,7 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
             parse_codex_auth_status(output.status.success(), &output.stdout, &output.stderr)
         }
         Tool::Opencode => parse_opencode_auth_status(output.status.success(), &output.stdout),
-        Tool::Omp | Tool::PrimeAgent => {
+        Tool::Omp | Tool::PrimeAgent | Tool::Pi => {
             unreachable!("file-based auth status returned before command execution")
         }
     }
@@ -209,8 +216,20 @@ fn omp_credential_count(database: &Path) -> rusqlite::Result<i64> {
 /// MCP, trace sharing, and web search do not make a model available, so only a
 /// remaining entry counts as being signed in to the agent itself.
 fn prime_agent_auth_status(profile: &Profile) -> AuthStatus {
-    let auth = profile.prime_agent_home.join("auth.json");
-    let contents = match fs::read(&auth) {
+    json_auth_status(&profile.prime_agent_home.join("auth.json"), |provider| {
+        !provider.starts_with("mcp:") && provider != "prime-agent-traces" && provider != "serper"
+    })
+}
+
+/// Pi's auth file contains only model-provider credentials, so any entry makes
+/// a model available. Environment credentials stay ambient and are warned
+/// about separately rather than attributed to every profile.
+fn pi_auth_status(profile: &Profile) -> AuthStatus {
+    json_auth_status(&profile.pi_home.join("auth.json"), |_| true)
+}
+
+fn json_auth_status(auth: &Path, counts: impl Fn(&str) -> bool) -> AuthStatus {
+    let contents = match fs::read(auth) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return AuthStatus::SignedOut,
         Err(_) => return AuthStatus::Unavailable,
@@ -222,9 +241,7 @@ fn prime_agent_auth_status(profile: &Profile) -> AuthStatus {
         return AuthStatus::Unavailable;
     };
 
-    if credentials.keys().any(|provider| {
-        !provider.starts_with("mcp:") && provider != "prime-agent-traces" && provider != "serper"
-    }) {
+    if credentials.keys().any(|provider| counts(provider)) {
         AuthStatus::SignedIn
     } else {
         AuthStatus::SignedOut
@@ -366,6 +383,17 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
                         profile.prime_agent_home.join("sessions"),
                     )
                     .env_remove("PRIME_AGENT_CODING_AGENT_SESSION_DIR");
+            }
+        }
+        Tool::Pi => {
+            command.env("PI_CODING_AGENT_DIR", &profile.pi_home);
+            if profile.managed {
+                // This outranks a session directory in the shared settings, so
+                // changing accounts cannot leave their transcripts together.
+                command.env(
+                    "PI_CODING_AGENT_SESSION_DIR",
+                    profile.pi_home.join("sessions"),
+                );
             }
         }
     }
@@ -561,6 +589,7 @@ mod tests {
                 config: PathBuf::from("/profiles/work/opencode/config"),
                 state: PathBuf::from("/profiles/work/opencode/state"),
             },
+            pi_home: PathBuf::from("/profiles/work/pi"),
             prime_agent_home: PathBuf::from("/profiles/work/prime-agent"),
             managed: true,
         }
@@ -642,6 +671,23 @@ mod tests {
     }
 
     #[test]
+    fn pi_uses_isolated_config_and_session_directories() {
+        let profile = profile();
+        let expected_sessions = profile.pi_home.join("sessions");
+        let command = build_command(Tool::Pi, &profile, &[]);
+        let environment = command.get_envs().collect::<Vec<_>>();
+
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("PI_CODING_AGENT_DIR"),
+            Some(profile.pi_home.as_os_str())
+        )));
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("PI_CODING_AGENT_SESSION_DIR"),
+            Some(expected_sessions.as_os_str())
+        )));
+    }
+
+    #[test]
     fn omp_uses_native_named_profile_and_exports_selection() {
         let command = build_command(
             Tool::Omp,
@@ -681,10 +727,10 @@ mod tests {
     }
 
     #[test]
-    fn stable_tool_keys_include_prime_agent() {
+    fn stable_tool_keys_include_every_agent() {
         assert_eq!(
             Tool::ALL.map(Tool::key),
-            ["claude", "codex", "opencode", "omp", "prime-agent"]
+            ["claude", "codex", "opencode", "omp", "prime-agent", "pi"]
         );
     }
 
@@ -724,6 +770,28 @@ mod tests {
             AuthOperation::Logout.args(Tool::PrimeAgent),
             Some(["/logout"].as_slice())
         );
+        assert_eq!(AuthOperation::Login.args(Tool::Pi), None);
+        assert_eq!(AuthOperation::Logout.args(Tool::Pi), None);
+    }
+
+    #[test]
+    fn reads_pi_provider_credentials() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut profile = profile();
+        profile.pi_home = temporary.path().join("pi");
+        fs::create_dir_all(&profile.pi_home).unwrap();
+
+        assert_eq!(pi_auth_status(&profile), AuthStatus::SignedOut);
+        fs::write(profile.pi_home.join("auth.json"), "{}").unwrap();
+        assert_eq!(pi_auth_status(&profile), AuthStatus::SignedOut);
+        fs::write(
+            profile.pi_home.join("auth.json"),
+            r#"{"anthropic":{"type":"oauth"}}"#,
+        )
+        .unwrap();
+        assert_eq!(pi_auth_status(&profile), AuthStatus::SignedIn);
+        fs::write(profile.pi_home.join("auth.json"), "not json").unwrap();
+        assert_eq!(pi_auth_status(&profile), AuthStatus::Unavailable);
     }
 
     #[test]

@@ -106,6 +106,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::PrimeAgent(arguments)) => {
             launch_direct(&store, &workspaces, Tool::PrimeAgent, arguments)
         }
+        Some(Command::Pi(arguments)) => launch_direct(&store, &workspaces, Tool::Pi, arguments),
         Some(Command::ShellInit(arguments)) => print_shell_init(arguments),
         Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
         Some(Command::Statusline(arguments)) => {
@@ -301,6 +302,7 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
                     "ditto-cli prime-agent {} -- /login",
                     profile.name
                 ),
+                "pi": format!("ditto-cli pi {} (then /login inside Pi)", profile.name),
             });
             created
         },
@@ -616,6 +618,7 @@ fn show_paths(
             );
             println!("omp={}", profile.omp_home.display());
             println!("prime-agent={}", profile.prime_agent_home.display());
+            println!("pi={}", profile.pi_home.display());
         },
     );
     Ok(())
@@ -633,6 +636,7 @@ fn profile_paths(profile: &Profile) -> Value {
         "opencode_config": profile.opencode.config_dir().display().to_string(),
         "omp": profile.omp_home.display().to_string(),
         "prime_agent": profile.prime_agent_home.display().to_string(),
+        "pi": profile.pi_home.display().to_string(),
     })
 }
 
@@ -1013,6 +1017,7 @@ fn print_login_instructions(profile: &Profile) {
     println!("  ditto-cli opencode {} -- auth login", profile.name);
     println!("  ditto-cli prime-agent {} -- /login", profile.name);
     println!();
-    println!("Launch OMP, then use `/login` inside it:");
+    println!("Launch OMP or Pi, then use `/login` inside it:");
     println!("  ditto-cli omp {}", profile.name);
+    println!("  ditto-cli pi {}", profile.name);
 }

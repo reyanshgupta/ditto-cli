@@ -95,6 +95,26 @@ const PRIME_AGENT: &[&str] = &[
     "harness",
 ];
 
+/// Pi keeps credentials in `auth.json` and transcripts in `sessions`, while
+/// `models.json` may contain literal keys and secret headers. Everything below
+/// is reusable configuration, installed packages, or downloaded tooling.
+const PI: &[&str] = &[
+    "settings.json",
+    "keybindings.json",
+    "trust.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "SYSTEM.md",
+    "APPEND_SYSTEM.md",
+    "prompts",
+    "skills",
+    "extensions",
+    "themes",
+    "git",
+    "npm",
+    "bin",
+];
+
 /// What linking did, so a caller can say so rather than leaving it to be
 /// noticed when a skill turns out to be missing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -233,6 +253,13 @@ fn paths(profile: &Profile) -> Vec<Owned> {
             tool: Tool::PrimeAgent,
             label: format!("prime-agent/{name}"),
             path: profile.prime_agent_home.join(name),
+        });
+    }
+    for name in PI {
+        paths.push(Owned {
+            tool: Tool::Pi,
+            label: format!("pi/{name}"),
+            path: profile.pi_home.join(name),
         });
     }
     paths
@@ -644,6 +671,7 @@ mod tests {
             "projects",
             "history.jsonl",
             "auth.json",
+            "oauth.json",
             "account.json",
             "agent.db",
             "state",
@@ -657,10 +685,28 @@ mod tests {
                 !CLAUDE.contains(&name)
                     && !CODEX.contains(&name)
                     && !OMP.contains(&name)
-                    && !PRIME_AGENT.contains(&name),
+                    && !PRIME_AGENT.contains(&name)
+                    && !PI.contains(&name),
                 "'{name}' carries an account and must not be shared between profiles"
             );
         }
+    }
+
+    #[test]
+    fn a_pi_profile_reads_the_global_skills() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.pi_home.join("skills"), "profile-test.md");
+
+        let target = store.create_profile("work").unwrap();
+        let linked = link(&source, &target, false).unwrap();
+
+        assert!(linked.linked.contains(&"pi/skills".to_owned()));
+        assert_eq!(
+            fs::read_to_string(target.pi_home.join("skills/profile-test.md")).unwrap(),
+            "yours"
+        );
     }
 
     #[test]

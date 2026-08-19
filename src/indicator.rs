@@ -770,6 +770,7 @@ mod tests {
                 config: root.join("opencode/config"),
                 state: root.join("opencode/state"),
             },
+            pi_home: root.join("pi"),
             prime_agent_home: root.join("prime-agent"),
             managed: true,
         }
@@ -1142,8 +1143,10 @@ mod tests {
             title(Tool::PrimeAgent, &profile),
             "ditto:work — Prime Agent"
         );
+        assert_eq!(title(Tool::Pi, &profile), "ditto:work — Pi");
         assert!(sets_own_title(Tool::Claude));
         assert!(!sets_own_title(Tool::Codex));
         assert!(!sets_own_title(Tool::PrimeAgent));
+        assert!(!sets_own_title(Tool::Pi));
     }
 }

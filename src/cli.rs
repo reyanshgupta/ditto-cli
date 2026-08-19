@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "ditto-cli",
     version,
-    about = "Launch Claude Code, Codex, opencode, OMP, and Prime Agent with isolated profiles"
+    about = "Launch Claude Code, Codex, opencode, OMP, Prime Agent, and Pi with isolated profiles"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -67,6 +67,8 @@ pub enum Command {
     /// Launch Prime Agent.
     #[command(visible_alias = "pa")]
     PrimeAgent(LaunchArgs),
+    /// Launch Pi.
+    Pi(LaunchArgs),
     /// Print shell functions that route the tools' own names through Ditto.
     ShellInit(ShellInitArgs),
     /// Show or change the profile indicator Claude Code displays.
@@ -370,6 +372,29 @@ mod tests {
                     && args == [
                         OsString::from("--model"),
                         OsString::from("claude-opus-4-1"),
+                    ]
+        ));
+    }
+
+    #[test]
+    fn parses_pi_launch_arguments() {
+        let cli = Cli::try_parse_from([
+            "ditto-cli",
+            "pi",
+            "work",
+            "--",
+            "--model",
+            "anthropic/claude-opus-4-6",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Pi(LaunchArgs { profile, args }))
+                if profile.as_deref() == Some("work")
+                    && args == [
+                        OsString::from("--model"),
+                        OsString::from("anthropic/claude-opus-4-6"),
                     ]
         ));
     }

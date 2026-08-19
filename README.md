@@ -5,9 +5,9 @@
 [![MIT license](https://img.shields.io/badge/license-MIT-6f42c1.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-6f42c1.svg)](https://www.rust-lang.org/)
 
-Keep work, personal, and client Claude Code, Codex, opencode, OMP, and Prime Agent logins apart.
+Keep work, personal, and client Claude Code, Codex, opencode, OMP, Prime Agent, and Pi logins apart.
 
-Ditto CLI gives each profile its own authentication and session history while keeping the capabilities you configured once. Pick a profile in the terminal, then launch any of the five tools. Your existing setup stays available as the `default` profile.
+Ditto CLI gives each profile its own authentication and session history while keeping the capabilities you configured once. Pick a profile in the terminal, then launch any of the six tools. Your existing setup stays available as the `default` profile.
 
 Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, whichever coding identity you need.
 
@@ -26,6 +26,7 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 │                        ││opencode     ⠹ Checking                             │
 │                        ││OMP          ○ Sign in required                     │
 │                        ││Prime Agent  ● Signed in                            │
+│                        ││Pi           ○ Sign in required                     │
 │                        ││                                                    │
 │                        ││Profile directories                                 │
 │                        ││Claude Code  ~/.ditto/profiles/work/claude          │
@@ -33,9 +34,10 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 │                        ││opencode     …/work/opencode/data/opencode          │
 │                        ││OMP          ~/.omp/profiles/work/agent             │
 │                        ││Prime Agent  …/.ditto/profiles/work/prime-agent     │
+│                        ││Pi           ~/.ditto/profiles/work/pi              │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│       c Claude Code · x Codex · o opencode · p OMP · a Prime                 │
+│     c Claude Code · x Codex · o opencode · p OMP · a Prime · i Pi           │
 │              ↑↓ select · n new · e rename · d default                        │
 │              l sign in · L sign out · r refresh · q quit                     │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -43,7 +45,7 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 
 ## How it works
 
-Claude Code, Codex, opencode, OMP, and Prime Agent keep user-level configuration and login state on disk. That works until you need separate accounts for different jobs. Manually moving auth files around is easy to get wrong, and it is hard to tell which account a new session will use.
+Claude Code, Codex, opencode, OMP, Prime Agent, and Pi keep user-level configuration and login state on disk. That works until you need separate accounts for different jobs. Manually moving auth files around is easy to get wrong, and it is hard to tell which account a new session will use.
 
 Instead, Ditto CLI launches each tool pointed at the selected profile:
 
@@ -54,16 +56,17 @@ Instead, Ditto CLI launches each tool pointed at the selected profile:
 | opencode | `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` under `~/.ditto/profiles/<name>/opencode` |
 | OMP | `omp --profile <name>` and `OMP_PROFILE=<name>` |
 | Prime Agent | `PRIME_AGENT_CODING_AGENT_DIR=~/.ditto/profiles/<name>/prime-agent` and a matching `PRIME_AGENT_SESSION_DIR` |
+| Pi | `PI_CODING_AGENT_DIR=~/.ditto/profiles/<name>/pi` and a matching `PI_CODING_AGENT_SESSION_DIR` |
 
 opencode has no single home variable; it resolves its directories the XDG way, so Ditto CLI pins the three bases that hold credentials, configuration, and session state. `XDG_CACHE_HOME` is deliberately left alone so profiles keep sharing opencode's downloaded tooling. Those variables are set for the launched process and anything it starts, including commands opencode's own tools run.
 
-Prime Agent's own settings can name a session directory, so managed profiles also set `PRIME_AGENT_SESSION_DIR` explicitly. That keeps transcripts, session artifacts, and local harness state inside the selected profile even while reusable Prime Agent settings and capabilities are linked to yours.
+Prime Agent and Pi settings can name a session directory, so managed profiles set `PRIME_AGENT_SESSION_DIR` or `PI_CODING_AGENT_SESSION_DIR` explicitly. That keeps transcripts and local harness state inside the selected profile even while reusable settings and capabilities are linked to yours.
 
 No config files are swapped. Profiles remain independent, and switching only affects the process Ditto CLI launched.
 
 ## Install
 
-Ditto CLI needs at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), [Oh My Pi](https://github.com/can1357/oh-my-pi), or [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
+Ditto CLI needs at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), [Oh My Pi](https://github.com/can1357/oh-my-pi), [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), or [Pi](https://pi.dev).
 
 On macOS and Linux, Homebrew installs the prebuilt binary for your platform, so it needs no Rust toolchain:
 
@@ -150,7 +153,7 @@ Then:
 1. Press `n` and name the profile, such as `work`.
 2. Select the profile and press `l`, then choose Claude Code, Codex, opencode, or Prime Agent. Prime Agent opens directly on its `/login` dialog.
 3. Press `c` for Claude Code, `x` for Codex, `o` for opencode, or `a` for Prime Agent.
-4. Press `p` for OMP, then use `/login` inside OMP.
+4. Press `p` for OMP or `i` for Pi, then use `/login` inside it.
 
 Each tool keeps its own credentials. Signing in to one does not copy credentials into another.
 
@@ -164,6 +167,7 @@ Each tool keeps its own credentials. Signing in to one does not copy credentials
 | `o` | Launch opencode |
 | `p` | Launch OMP |
 | `a` | Launch Prime Agent |
+| `i` | Launch Pi |
 | `l` | Sign in with Claude Code, Codex, opencode, or Prime Agent |
 | `L` | Sign out, with confirmation |
 | `n` | Create a profile |
@@ -176,7 +180,7 @@ Sign-in status is checked in the background, so the list stays responsive while 
 
 The selected profile is remembered for the next run. The `★` default is separate and stays put: it is the profile every command uses when you leave the name out, and running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one. See [which profile a command uses](#which-profile-a-command-uses).
 
-Renaming keeps the profile's settings, session history, and its Codex, opencode, and Prime Agent logins. Claude Code is the exception, and the rename dialog says so before you commit to it: see [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). The built-in `default` profile cannot be renamed.
+Renaming keeps the profile's settings, session history, and its Codex, opencode, Prime Agent, and Pi logins. Claude Code is the exception, and the rename dialog says so before you commit to it: see [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out). The built-in `default` profile cannot be renamed.
 
 ## Command-line usage
 
@@ -188,7 +192,7 @@ ditto-cli create work
 ditto-cli rename work client-a
 ditto-cli delete work --yes   # removes credentials and sessions for good
 ditto-cli list
-ditto-cli status client-a     # sign-in state for all five tools
+ditto-cli status client-a     # sign-in state for all six tools
 ditto-cli paths client-a
 ditto-cli sync client-a       # re-copy your Claude Code settings into it
 
@@ -198,6 +202,7 @@ ditto-cli codex client-a      # or: cx
 ditto-cli opencode client-a   # or: oc
 ditto-cli omp client-a
 ditto-cli prime-agent client-a # or: pa
+ditto-cli pi client-a
 
 # Pass arguments to the underlying CLI after --
 ditto-cli claude client-a -- --model opus
@@ -205,6 +210,7 @@ ditto-cli codex client-a -- --search
 ditto-cli opencode client-a -- --model anthropic/claude-opus-5
 ditto-cli omp client-a -- --model opus
 ditto-cli prime-agent client-a -- --model claude-opus-4-1
+ditto-cli pi client-a -- --model anthropic/claude-opus-4-6
 
 # Bind a directory to a profile
 ditto-cli workspace                  # what this directory launches with
@@ -237,10 +243,11 @@ ditto-cli opencode client-a -- auth login
 ditto-cli prime-agent client-a -- /login
 ```
 
-OMP exposes login only inside its interface. Launch the selected profile, then run `/login` or `/logout` there:
+OMP and Pi expose login only inside their interfaces. Launch the selected profile, then run `/login` or `/logout` there:
 
 ```bash
 ditto-cli omp client-a
+ditto-cli pi client-a
 ```
 
 Deleting is the one command that destroys something, so it asks to be meant. Without `--yes` it lists the directories it would remove and stops. The built-in `default` profile cannot be deleted; it is your own configuration, which Ditto CLI never created.
@@ -412,7 +419,7 @@ Every tool also names the profile in the window and tab title:
 ditto:client-a — Codex — my-repo
 ```
 
-All five tools write their own titles and keep updating them as you work, so a title set once before handing over is overwritten within moments. Instead, Ditto CLI runs the tool in a pseudoterminal and rewrites the title sequences on their way to the terminal, adding `ditto:<profile>` in front of whatever the tool called itself. You keep the tool's own title and gain the profile.
+All six tools write their own titles and keep updating them as you work, so a title set once before handing over is overwritten within moments. Instead, Ditto CLI runs the tool in a pseudoterminal and rewrites the title sequences on their way to the terminal, adding `ditto:<profile>` in front of whatever the tool called itself. You keep the tool's own title and gain the profile.
 
 Everything else is forwarded byte for byte. Colours, hyperlinks, clipboard writes, mouse reporting, and anything the tool draws are untouched, and the tool still gets a real terminal, the right window size, and your keystrokes as it always did. Ditto CLI exits with the tool's own exit status.
 
@@ -448,7 +455,8 @@ ditto-cli --json status client-a
     { "tool": "codex", "label": "Codex", "status": "signed_out", "signed_in": false },
     { "tool": "opencode", "label": "opencode", "status": "signed_in", "signed_in": true },
     { "tool": "omp", "label": "OMP", "status": "signed_out", "signed_in": false },
-    { "tool": "prime-agent", "label": "Prime Agent", "status": "signed_in", "signed_in": true }
+    { "tool": "prime-agent", "label": "Prime Agent", "status": "signed_in", "signed_in": true },
+    { "tool": "pi", "label": "Pi", "status": "signed_out", "signed_in": false }
   ]
 }
 ```
@@ -490,8 +498,9 @@ A profile exists to be signed in as somebody else, not to be a different working
 | opencode | the whole configuration directory |
 | OMP | `config.yml`, `extensions` |
 | Prime Agent | `settings.json`, `keybindings.json`, instructions, prompts, skills, extensions, themes, packages, and the global harness |
+| Pi | `settings.json`, `keybindings.json`, project trust, instructions, prompts, skills, extensions, themes, packages, and managed tools |
 
-These are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync and no copies to drift apart. Everything else — `.claude.json`, `auth.json`, sessions, session artifacts, history, `agent.db` — stays inside the profile, which is the whole of what a profile keeps to itself. Prime Agent's `models.json` also stays private because custom provider definitions are allowed to contain literal API keys and secret headers.
+These are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync and no copies to drift apart. Everything else — `.claude.json`, `auth.json`, sessions, session artifacts, history, `agent.db` — stays inside the profile, which is the whole of what a profile keeps to itself. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
 
 What is shared is a named list rather than everything-but-the-credentials. Ditto CLI learning about a new extension directory late costs you a missing feature; sharing a new credential file by accident would cost you the isolation the tool exists for.
 
@@ -518,13 +527,14 @@ ditto-cli: repaired claude/skills/apple-design; it was installed pointing at not
 
 ## Where credentials and files are stored
 
-Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs, and OMP and Prime Agent authentication through `/login` inside their interfaces. Each tool stores the result wherever it normally would, under the directory Ditto CLI pointed it at:
+Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in its state file. Claude Code, Codex, and opencode authentication still runs through their installed CLIs, and OMP, Prime Agent, and Pi authentication through `/login` inside their interfaces. Each tool stores the result wherever it normally would, under the directory Ditto CLI pointed it at:
 
 - **Claude Code** uses the selected `CLAUDE_CONFIG_DIR`. On macOS the credentials themselves stay in the system Keychain, keyed to that directory's path, which is what keeps two profiles from sharing one login — and why [renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out).
 - **Codex** keeps its auth state under the selected `CODEX_HOME`.
 - **opencode** writes `auth.json` into the selected data directory.
 - **OMP** keeps auth, settings, sessions, and caches under `~/.omp/profiles/<name>/agent`.
 - **Prime Agent** keeps ordinary provider credentials in the selected agent directory's `auth.json`; its sessions and session artifacts stay below the same profile.
+- **Pi** keeps provider credentials in the selected agent directory's `auth.json`; `PI_CODING_AGENT_SESSION_DIR` keeps its transcripts below the same profile.
 
 Prime Agent currently has two upstream exceptions to that boundary. Prime Inference login uses the Prime CLI credential at `~/.prime/config.json`, for which Prime Agent exposes no path override; that one provider therefore remains shared across Ditto profiles. `PRIME_API_KEY` and other API-key environment variables are shared for the same reason any inherited environment credential is. Prime Agent also uses one user-wide background-service socket, so its `agents`, `list`, and `attach` views can see running agents from other profiles even though each agent receives its selected auth and session roots. Ditto's status report counts provider credentials in the isolated `auth.json`, not these ambient sources.
 
@@ -542,19 +552,21 @@ Ditto CLI's own files are laid out like this:
     │   │   ├── config/opencode/
     │   │   ├── data/opencode/      # auth.json lives here
     │   │   └── state/opencode/
-    │   └── prime-agent/            # auth.json and sessions live here
+    │   ├── prime-agent/            # auth.json and sessions live here
+    │   └── pi/                     # auth.json and sessions live here
     └── personal/
         ├── claude/
         ├── codex/
         ├── opencode/
-        └── prime-agent/
+        ├── prime-agent/
+        └── pi/
 ```
 
 The nested `opencode/` directory is opencode's own doing: it appends its name to every XDG base it is given. OMP profiles are the one thing kept outside this tree, since OMP manages its own profile directory.
 
 Directories are created with user-only permissions on macOS and Linux; see [Windows notes](#windows-notes) for the difference there.
 
-The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.local/share/opencode` and `~/.config/opencode` (or wherever your `XDG_*` variables already send them), OMP's native `~/.omp/agent` profile, and Prime Agent's `~/.prime/agent` directory (or `PRIME_AGENT_CODING_AGENT_DIR` when set). It exposes your existing setup without copying or migrating anything. For opencode the `default` profile resolves the same XDG bases opencode would pick on its own, so pointing at it changes nothing.
+The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.local/share/opencode` and `~/.config/opencode` (or wherever your `XDG_*` variables already send them), OMP's native `~/.omp/agent` profile, Prime Agent's `~/.prime/agent` directory (or `PRIME_AGENT_CODING_AGENT_DIR` when set), and Pi's `~/.pi/agent` directory (or `PI_CODING_AGENT_DIR` when set). It exposes your existing setup without copying or migrating anything. For opencode the `default` profile resolves the same XDG bases opencode would pick on its own, so pointing at it changes nothing.
 
 ## Environment variables
 
@@ -566,6 +578,7 @@ The `default` profile points to `~/.claude`, `~/.codex`, opencode's own `~/.loca
 | `DITTO_OPENCODE_BIN` | Override the `opencode` executable |
 | `DITTO_OMP_BIN` | Override the `omp` executable |
 | `DITTO_PRIME_AGENT_BIN` | Override the `prime-agent` executable |
+| `DITTO_PI_BIN` | Override the `pi` executable |
 | `DITTO_PROFILE` | Selected profile name exported to every launched tool, and what Claude Code's status line reports |
 | `DITTO_NO_PROXY` | Hand the terminal straight to the tool, leaving the title to it (macOS and Linux) |
 | `HERDR_PANE_ID` | Read, not set: herdr names the pane it opened, and Ditto CLI steps aside and reports the profile to herdr. See [Under herdr](#under-herdr) |
@@ -589,7 +602,7 @@ Ditto CLI warns before the rename and tells you how to get back in:
 ditto-cli claude client-a -- auth login
 ```
 
-Codex, opencode, and Prime Agent keep their ordinary credentials in files inside the profile, so they survive a rename untouched.
+Codex, opencode, Prime Agent, and Pi keep their ordinary credentials in files inside the profile, so they survive a rename untouched.
 
 ## Windows notes
 

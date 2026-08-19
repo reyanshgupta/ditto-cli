@@ -18,6 +18,7 @@ pub struct Profile {
     pub codex_home: PathBuf,
     pub omp_home: PathBuf,
     pub opencode: OpencodeHome,
+    pub pi_home: PathBuf,
     pub prime_agent_home: PathBuf,
     pub managed: bool,
 }
@@ -79,11 +80,28 @@ fn xdg_base(variable: &str, fallback: PathBuf) -> PathBuf {
         .unwrap_or(fallback)
 }
 
+fn configured_home(variable: &str, user_home: &Path, fallback: PathBuf) -> PathBuf {
+    env::var_os(variable)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map(|configured| {
+            if configured == Path::new("~") {
+                return user_home.to_path_buf();
+            }
+            match configured.to_str().and_then(|path| path.strip_prefix("~/")) {
+                Some(relative) => user_home.join(relative),
+                None => configured,
+            }
+        })
+        .unwrap_or(fallback)
+}
+
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
     user_home: PathBuf,
     native_opencode: OpencodeHome,
+    native_pi: PathBuf,
     native_prime_agent: PathBuf,
 }
 
@@ -148,23 +166,21 @@ impl Store {
             .unwrap_or_else(|| user_home.join(".ditto"));
 
         let native_opencode = OpencodeHome::from_environment(&user_home);
-        let native_prime_agent = env::var_os("PRIME_AGENT_CODING_AGENT_DIR")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .map(|configured| {
-                if configured == Path::new("~") {
-                    return user_home.clone();
-                }
-                match configured.to_str().and_then(|path| path.strip_prefix("~/")) {
-                    Some(relative) => user_home.join(relative),
-                    None => configured,
-                }
-            })
-            .unwrap_or_else(|| user_home.join(".prime").join("agent"));
+        let native_pi = configured_home(
+            "PI_CODING_AGENT_DIR",
+            &user_home,
+            user_home.join(".pi").join("agent"),
+        );
+        let native_prime_agent = configured_home(
+            "PRIME_AGENT_CODING_AGENT_DIR",
+            &user_home,
+            user_home.join(".prime").join("agent"),
+        );
         Ok(Self {
             root,
             user_home,
             native_opencode,
+            native_pi,
             native_prime_agent,
         })
     }
@@ -172,11 +188,13 @@ impl Store {
     #[cfg(test)]
     pub fn new(root: PathBuf, user_home: PathBuf) -> Self {
         let native_opencode = OpencodeHome::native(&user_home);
+        let native_pi = user_home.join(".pi").join("agent");
         let native_prime_agent = user_home.join(".prime").join("agent");
         Self {
             root,
             user_home,
             native_opencode,
+            native_pi,
             native_prime_agent,
         }
     }
@@ -239,6 +257,7 @@ impl Store {
             profile.opencode.data.as_path(),
             profile.opencode.config.as_path(),
             profile.opencode.state.as_path(),
+            profile.pi_home.as_path(),
             profile.prime_agent_home.as_path(),
         ];
 
@@ -495,6 +514,7 @@ impl Store {
             codex_home: self.user_home.join(".codex"),
             omp_home: self.user_home.join(".omp").join("agent"),
             opencode: self.native_opencode.clone(),
+            pi_home: self.native_pi.clone(),
             prime_agent_home: self.native_prime_agent.clone(),
             managed: false,
         }
@@ -508,6 +528,7 @@ impl Store {
             codex_home: root.join("codex"),
             omp_home: self.omp_profile_root(name).join("agent"),
             opencode: OpencodeHome::isolated(&self.opencode_root(name)),
+            pi_home: root.join("pi"),
             prime_agent_home: root.join("prime-agent"),
             managed: true,
         }
@@ -710,6 +731,7 @@ mod tests {
         assert!(profile.opencode.data.is_dir());
         assert!(profile.opencode.config.is_dir());
         assert!(profile.opencode.state.is_dir());
+        assert!(profile.pi_home.is_dir());
         assert!(profile.prime_agent_home.is_dir());
         assert!(store.create_profile("work").is_err());
 
@@ -753,6 +775,7 @@ mod tests {
             default.opencode.config_dir(),
             home.join(".config").join("opencode")
         );
+        assert_eq!(default.pi_home, home.join(".pi").join("agent"));
         assert_eq!(default.prime_agent_home, home.join(".prime").join("agent"));
         Ok(())
     }
@@ -828,6 +851,7 @@ mod tests {
         std::fs::write(original.opencode.data_dir().join("auth.json"), "kept")?;
         std::fs::create_dir_all(&original.omp_home)?;
         std::fs::write(original.omp_home.join("marker"), "kept")?;
+        std::fs::write(original.pi_home.join("auth.json"), "kept")?;
         std::fs::write(original.prime_agent_home.join("auth.json"), "kept")?;
         store.save_last_profile("work")?;
         store.set_default_profile_name(Some("work"))?;
@@ -845,6 +869,10 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(renamed.omp_home.join("marker"))?,
+            "kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(renamed.pi_home.join("auth.json"))?,
             "kept"
         );
         assert_eq!(
@@ -876,6 +904,7 @@ mod tests {
 
         assert!(!profile.claude_home.exists());
         assert!(!profile.omp_home.exists());
+        assert!(!profile.pi_home.exists());
         assert!(!profile.prime_agent_home.exists());
         assert!(store.load_profile("work").is_err());
         // A pin left pointing at a deleted profile would break every command

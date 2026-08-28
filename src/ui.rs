@@ -980,7 +980,11 @@ fn rename_signs_out(auth: &HashMap<String, ProfileAuth>, name: &str) -> bool {
 /// Grows a notice to fit the message it carries. The popup wraps its text, so
 /// a fixed height would clip anything longer than one line.
 fn notice_height(message: &str, area: Rect) -> u16 {
-    let inner = usize::from(area.width * 64 / 100).saturating_sub(2).max(1);
+    // The multiplication is done in `usize`: `area.width` is a `u16`, and a
+    // terminal past 1023 columns would overflow one before the division.
+    let inner = (usize::from(area.width) * 64 / 100)
+        .saturating_sub(2)
+        .max(1);
     let wrapped = u16::try_from(message.chars().count().div_ceil(inner)).unwrap_or(u16::MAX);
     // Two borders, a blank line and the closing hint sit around the message.
     wrapped.saturating_add(4).clamp(7, area.height)
@@ -1007,6 +1011,18 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// A terminal wide enough to overflow the `u16` the width is measured in
+    /// used to size the notice from a wrapped-around number.
+    #[test]
+    fn sizes_a_notice_on_a_terminal_too_wide_for_a_u16_multiplication() {
+        let narrow = Rect::new(0, 0, 100, 40);
+        let wide = Rect::new(0, 0, 2000, 40);
+        let message = "x".repeat(400);
+
+        assert!(notice_height(&message, narrow) > notice_height(&message, wide));
+        assert_eq!(notice_height(&message, wide), 7);
+    }
 
     /// The footer centres each row inside a border, so a row wider than its
     /// box is silently clipped rather than wrapped. This pins the width that

@@ -5,20 +5,26 @@
 [![MIT license](https://img.shields.io/badge/license-MIT-6f42c1.svg)](LICENSE)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-6f42c1.svg)](https://www.rust-lang.org/)
 
-Keep work, personal, and client Claude Code, Codex, opencode, OMP, Prime Agent, and Pi logins apart.
+**Keep your work, personal, and client logins apart across Claude Code, Codex, opencode, OMP, Prime Agent, and Pi.**
 
-Ditto CLI gives each profile its own authentication and session history while keeping the capabilities you configured once. Pick a profile in the terminal, then launch any of the six tools. Your existing setup stays available as the `default` profile.
+Each profile gets its own credentials and conversation history. Everything you set up once — skills, subagents, slash commands, hooks, plugins, memory files — stays shared, so a profile is the same working environment signed in as somebody else. Your existing setup keeps working as the `default` profile; nothing is moved, copied, or migrated.
 
-Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, whichever coding identity you need.
+```bash
+ditto-cli create work        # a profile with logins of its own
+ditto-cli claude work        # launch Claude Code inside it
+ditto-cli workspace use work # or bind the project once and stop typing the name
+```
+
+Pick a profile in the terminal, then launch any of the six tools:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    Ditto CLI  choose a profile, then a tool                  │
+│                   Ditto CLI  choose a profile, then a tool                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ Profiles ──────────────┐┌ Selected profile ──────────────────────────────────┐
 │  default  existing     ││work  Isolated profile                              │
-│› work              ★   ││                                                    │
-│  personal              ││★ Used when no profile is named                     │
+│  personal              ││                                                    │
+│› work  ★               ││★ Used when no profile is named                     │
 │                        ││                                                    │
 │                        ││Sign-in status                                      │
 │                        ││Claude Code  ● Signed in                            │
@@ -33,15 +39,27 @@ Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, which
 │                        ││Codex        ~/.ditto/profiles/work/codex           │
 │                        ││opencode     …/work/opencode/data/opencode          │
 │                        ││OMP          ~/.omp/profiles/work/agent             │
-│                        ││Prime Agent  …/.ditto/profiles/work/prime-agent     │
+│                        ││Prime Agent  ~/.ditto/profiles/work/prime-agent     │
 │                        ││Pi           ~/.ditto/profiles/work/pi              │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│     c Claude Code · x Codex · o opencode · p OMP · a Prime · i Pi           │
-│              ↑↓ select · n new · e rename · d default                        │
-│              l sign in · L sign out · r refresh · q quit                     │
+│         c Claude Code · x Codex · o opencode · p OMP · a Prime · i Pi        │
+│                   ↑↓ select · n new · e rename · d default                   │
+│                  l sign in · L sign out · r refresh · q quit                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Ditto CLI takes its name from the shape-shifting Pokémon: one small tool, whichever coding identity you need.
+
+## Contents
+
+**Getting going** — [How it works](#how-it-works) · [Install](#install) · [Update](#update) · [Quick start](#quick-start)
+
+**Everyday use** — [TUI controls](#tui-controls) · [Command-line usage](#command-line-usage) · [Which profile a command uses](#which-profile-a-command-uses) · [Workspaces](#workspaces) · [Shell integration](#shell-integration) · [Knowing which profile you are in](#knowing-which-profile-you-are-in)
+
+**What a profile keeps and shares** — [Settings a new profile inherits](#settings-a-new-profile-inherits) · [Skills, subagents, and everything else you set up once](#skills-subagents-and-everything-else-you-set-up-once) · [Where credentials and files are stored](#where-credentials-and-files-are-stored)
+
+**Reference** — [Scripting and agents](#scripting-and-agents) · [Environment variables](#environment-variables) · [Renaming a profile signs Claude Code out](#renaming-a-profile-signs-claude-code-out) · [Windows notes](#windows-notes) · [Remove Ditto CLI](#remove-ditto-cli) · [Development](#development)
 
 ## How it works
 
@@ -58,43 +76,45 @@ Instead, Ditto CLI launches each tool pointed at the selected profile:
 | Prime Agent | `PRIME_AGENT_CODING_AGENT_DIR=~/.ditto/profiles/<name>/prime-agent` and a matching `PRIME_AGENT_SESSION_DIR` |
 | Pi | `PI_CODING_AGENT_DIR=~/.ditto/profiles/<name>/pi` and a matching `PI_CODING_AGENT_SESSION_DIR` |
 
+No config files are swapped. Profiles stay independent, and switching only affects the process Ditto CLI launched.
+
+<details>
+<summary>Why opencode, Prime Agent, and Pi take more than one variable</summary>
+
+<br>
+
 opencode has no single home variable; it resolves its directories the XDG way, so Ditto CLI pins the three bases that hold credentials, configuration, and session state. `XDG_CACHE_HOME` is deliberately left alone so profiles keep sharing opencode's downloaded tooling. Those variables are set for the launched process and anything it starts, including commands opencode's own tools run.
 
 Prime Agent and Pi settings can name a session directory, so managed profiles set `PRIME_AGENT_SESSION_DIR` or `PI_CODING_AGENT_SESSION_DIR` explicitly. That keeps transcripts and local harness state inside the selected profile even while reusable settings and capabilities are linked to yours.
 
-No config files are swapped. Profiles remain independent, and switching only affects the process Ditto CLI launched.
+</details>
 
 ## Install
 
 Ditto CLI needs at least one of the supported CLIs to be useful: [Claude Code](https://code.claude.com/docs/en/setup), [OpenAI Codex CLI](https://github.com/openai/codex), [opencode](https://opencode.ai/docs/), [Oh My Pi](https://github.com/can1357/oh-my-pi), [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), or [Pi](https://pi.dev).
 
-On macOS and Linux, Homebrew installs the prebuilt binary for your platform, so it needs no Rust toolchain:
+Take whichever channel you already use. They all install the same binary, and the command is `ditto-cli` either way:
+
+| Channel | Command | Notes |
+| --- | --- | --- |
+| **Homebrew** | `brew install reyanshgupta/tap/ditto-cli` | macOS and Linux. Prebuilt, so no Rust toolchain. |
+| **npm** | `npm install -g @reyanshgupta/ditto-cli` | macOS, Linux, and Windows. The same prebuilt binaries. |
+| **binstall** | `cargo binstall ditto-cli` | Takes the released binary rather than compiling one. |
+| **Cargo** | `cargo install ditto-cli` | Builds from source; needs Rust 1.85 or newer. |
+
+If you installed Claude Code or Codex with npm, npm is already here. You can also try Ditto CLI without installing it:
 
 ```bash
-brew install reyanshgupta/tap/ditto-cli
-```
-
-npm carries the same prebuilt binaries, on macOS, Linux, and Windows alike. If you installed Claude Code or Codex with npm, it is already here:
-
-```bash
-npm install -g @reyanshgupta/ditto-cli
-npx @reyanshgupta/ditto-cli list        # or try it without installing
+npx @reyanshgupta/ditto-cli list
 ```
 
 The npm package is scoped because plain `ditto-cli` on npm belongs to an unrelated project. The command it installs is still `ditto-cli`.
 
-Cargo builds from source instead, and needs Rust 1.85 or newer:
+`cargo binstall` is a good deal quicker than `cargo install`, because a source build compiles a bundled SQLite before it links anything. To build from the latest source, or from a checkout:
 
 ```bash
-cargo install ditto-cli                                          # from crates.io
-cargo install --git https://github.com/reyanshgupta/ditto-cli    # from the latest source
-```
+cargo install --git https://github.com/reyanshgupta/ditto-cli
 
-`cargo binstall ditto-cli` takes the released binary instead of compiling one, which is a good deal quicker: a source build compiles a bundled SQLite before it links anything.
-
-Or from a local checkout:
-
-```bash
 git clone https://github.com/reyanshgupta/ditto-cli.git
 cd ditto-cli
 cargo install --path .
@@ -110,7 +130,7 @@ On Windows, `cargo install` already writes into `%USERPROFILE%\.cargo\bin`, whic
 
 Ditto CLI installs as `ditto-cli`, not `ditto`: macOS already uses that name for its built-in file-copy utility at `/usr/bin/ditto`.
 
-macOS, Linux, and Windows are all supported, and every command below behaves the same on each. Two smaller things differ on Windows — see [Windows notes](#windows-notes).
+macOS, Linux, and Windows are all supported, and every command below behaves the same on each. A few smaller things differ on Windows — see [Windows notes](#windows-notes).
 
 ### Update
 
@@ -142,20 +162,25 @@ Against an npm install it does not start at all. npm keeps its copy inside its o
 
 ## Quick start
 
-Open Ditto CLI:
+Open the picker:
 
 ```bash
 ditto-cli
 ```
 
-Then:
-
-1. Press `n` and name the profile, such as `work`.
-2. Select the profile and press `l`, then choose Claude Code, Codex, opencode, or Prime Agent. Prime Agent opens directly on its `/login` dialog.
-3. Press `c` for Claude Code, `x` for Codex, `o` for opencode, or `a` for Prime Agent.
-4. Press `p` for OMP or `i` for Pi, then use `/login` inside it.
+1. **Make a profile.** Press `n` and name it, such as `work`.
+2. **Sign in.** With the profile selected, press `l` and choose Claude Code, Codex, opencode, or Prime Agent; Prime Agent opens straight onto its `/login` dialog. (OMP and Pi have no sign-in command of their own — launch them in step 3 and run `/login` inside.)
+3. **Launch a tool** with its key: `c` Claude Code, `x` Codex, `o` opencode, `p` OMP, `a` Prime Agent, `i` Pi.
 
 Each tool keeps its own credentials. Signing in to one does not copy credentials into another.
+
+Or skip the picker entirely — every one of those steps has a command:
+
+```bash
+ditto-cli create work
+ditto-cli claude work -- auth login
+ditto-cli claude work
+```
 
 ## TUI controls
 
@@ -184,56 +209,62 @@ Renaming keeps the profile's settings, session history, and its Codex, opencode,
 
 ## Command-line usage
 
-The TUI is optional. Everything it does works directly from the shell:
+The TUI is optional. Everything it does works directly from the shell.
+
+**Manage profiles**
 
 ```bash
-# Profiles
 ditto-cli create work
 ditto-cli rename work client-a
-ditto-cli delete work --yes   # removes credentials and sessions for good
+ditto-cli delete work --yes      # removes credentials and sessions for good
 ditto-cli list
-ditto-cli status client-a     # sign-in state for all six tools
+ditto-cli status client-a        # sign-in state for all six tools
 ditto-cli paths client-a
-ditto-cli sync client-a       # preserve configuration for one profile
-ditto-cli sync --all          # preserve it for every managed profile
-ditto-cli sync --all --history # also backfill existing conversations
+ditto-cli sync client-a          # preserve configuration for one profile
+ditto-cli sync --all             # preserve it for every managed profile
+ditto-cli sync --all --history   # also backfill existing conversations
+```
 
-# Launch a tool, with short aliases where shown
-ditto-cli claude client-a     # or: cc
-ditto-cli codex client-a      # or: cx
-ditto-cli opencode client-a   # or: oc
-ditto-cli omp client-a
-ditto-cli prime-agent client-a # or: pa
-ditto-cli pi client-a
+**Launch a tool**
 
-# Pass arguments to the underlying CLI after --
-ditto-cli claude client-a -- --model opus
-ditto-cli codex client-a -- --search
-ditto-cli opencode client-a -- --model anthropic/claude-opus-5
-ditto-cli omp client-a -- --model opus
-ditto-cli prime-agent client-a -- --model claude-opus-4-1
-ditto-cli pi client-a -- --model anthropic/claude-opus-4-6
+| Command | Alias | Pass arguments through with `--` |
+| --- | --- | --- |
+| `ditto-cli claude client-a` | `cc` | `ditto-cli cc client-a -- --model opus` |
+| `ditto-cli codex client-a` | `cx` | `ditto-cli cx client-a -- --search` |
+| `ditto-cli opencode client-a` | `oc` | `ditto-cli oc client-a -- --model anthropic/claude-opus-5` |
+| `ditto-cli omp client-a` | — | `ditto-cli omp client-a -- --model opus` |
+| `ditto-cli prime-agent client-a` | `pa` | `ditto-cli pa client-a -- --model claude-opus-4-1` |
+| `ditto-cli pi client-a` | — | `ditto-cli pi client-a -- --model anthropic/claude-opus-4-6` |
 
-# Bind a directory to a profile
-ditto-cli workspace                  # what this directory launches with
+Everything after `--` goes to the tool untouched, so any flag it accepts works.
+
+**Bind a directory, so launches from it need no profile name**
+
+```bash
+ditto-cli workspace              # what this directory launches with
 ditto-cli workspace use client-a
 ditto-cli workspace clear
 ditto-cli workspace list
 ditto-cli workspace auto off
+```
 
-# Put Ditto in front of the tools' own names
-eval "$(ditto-cli shell-init zsh)"   # bash, fish, zsh; reads SHELL when omitted
+**Choose the profile used when a command names none and no directory is bound**
 
-# The profile used when a command names none and no directory is bound
-ditto-cli default             # report it
-ditto-cli default client-a    # pin it
-ditto-cli default --clear     # release it
+```bash
+ditto-cli default                # report it
+ditto-cli default client-a       # pin it
+ditto-cli default --clear        # release it
+```
 
-# Show the profile inside Claude Code
-ditto-cli indicator client-a             # report the status line setting
+**Put Ditto in front of the tools' own names, and show the profile inside Claude Code**
+
+```bash
+eval "$(ditto-cli shell-init zsh)"        # bash, fish, zsh; reads SHELL when omitted
+
+ditto-cli indicator client-a              # report the status line setting
 ditto-cli indicator client-a --on
 ditto-cli indicator client-a --off
-ditto-cli indicator client-a --keep-mine # in front of the status line you have
+ditto-cli indicator client-a --keep-mine  # in front of the status line you have
 ```
 
 The native authentication commands can be called through a profile too:
@@ -549,7 +580,18 @@ Ditto CLI does not ask for passwords, parse OAuth tokens, or keep credentials in
 - **Prime Agent** keeps ordinary provider credentials in the selected agent directory's `auth.json`; its sessions and session artifacts stay below the same profile.
 - **Pi** keeps provider credentials in the selected agent directory's `auth.json`; `PI_CODING_AGENT_SESSION_DIR` keeps its transcripts below the same profile.
 
-Prime Agent currently has two upstream exceptions to that boundary. Prime Inference login uses the Prime CLI credential at `~/.prime/config.json`, for which Prime Agent exposes no path override; that one provider therefore remains shared across Ditto profiles. `PRIME_API_KEY` and other API-key environment variables are shared for the same reason any inherited environment credential is. Prime Agent also uses one user-wide background-service socket, so its `agents`, `list`, and `attach` views can see running agents from other profiles even though each agent receives its selected auth and session roots. Ditto's status report counts provider credentials in the isolated `auth.json`, not these ambient sources.
+<details>
+<summary><strong>Prime Agent has two upstream exceptions to that boundary</strong></summary>
+
+<br>
+
+Prime Inference login uses the Prime CLI credential at `~/.prime/config.json`, for which Prime Agent exposes no path override; that one provider therefore remains shared across Ditto profiles. `PRIME_API_KEY` and other API-key environment variables are shared for the same reason any inherited environment credential is.
+
+Prime Agent also uses one user-wide background-service socket, so its `agents`, `list`, and `attach` views can see running agents from other profiles even though each agent receives its selected auth and session roots.
+
+Ditto's status report counts provider credentials in the isolated `auth.json`, not these ambient sources.
+
+</details>
 
 Ditto CLI's own files are laid out like this:
 

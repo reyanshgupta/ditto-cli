@@ -56,7 +56,7 @@ impl TitleFilter {
     /// The title to set before the tool has said anything.
     pub fn initial_title(&self) -> Vec<u8> {
         let mut sequence = Vec::new();
-        write_command(&mut sequence, b"0", self.label.as_bytes(), BELL);
+        write_command(&mut sequence, b"0", Some(self.label.as_bytes()), BELL);
         sequence
     }
 
@@ -113,10 +113,16 @@ impl TitleFilter {
     /// Emits a collected command, rewritten when it names the title.
     fn finish(&mut self, output: &mut Vec<u8>, terminator: u8) {
         let (kind, text) = split_command(&self.pending);
-        match (names_the_title(kind), std::str::from_utf8(text)) {
-            (true, Ok(text)) => {
+        match (names_the_title(kind), text.map(std::str::from_utf8)) {
+            (true, Some(Ok(text))) => {
                 let rewritten = self.rewrite(text);
-                write_command(output, kind, rewritten.as_bytes(), terminator);
+                write_command(output, kind, Some(rewritten.as_bytes()), terminator);
+            }
+            // A title command with no argument at all still means the empty
+            // title, so it is rewritten like any other rather than forwarded.
+            (true, None) => {
+                let rewritten = self.rewrite("");
+                write_command(output, kind, Some(rewritten.as_bytes()), terminator);
             }
             // Anything else is somebody else's sequence: hyperlinks, colours,
             // clipboard writes. It goes out exactly as it came in.
@@ -150,10 +156,15 @@ impl TitleFilter {
 }
 
 /// Splits a command into the number that says what it does and its argument.
-fn split_command(command: &[u8]) -> (&[u8], &[u8]) {
+///
+/// A command with no `;` has no argument, which is not the same as an empty
+/// one: `OSC 104` resets the whole palette while `OSC 104;` names no colour to
+/// reset. Putting the separator back into a sequence that never had one would
+/// change what it asks the terminal for, so the difference is carried.
+fn split_command(command: &[u8]) -> (&[u8], Option<&[u8]>) {
     match command.iter().position(|&byte| byte == b';') {
-        Some(separator) => (&command[..separator], &command[separator + 1..]),
-        None => (command, b""),
+        Some(separator) => (&command[..separator], Some(&command[separator + 1..])),
+        None => (command, None),
     }
 }
 
@@ -163,12 +174,14 @@ fn names_the_title(kind: &[u8]) -> bool {
     matches!(kind, b"0" | b"1" | b"2")
 }
 
-fn write_command(output: &mut Vec<u8>, kind: &[u8], text: &[u8], terminator: u8) {
+fn write_command(output: &mut Vec<u8>, kind: &[u8], text: Option<&[u8]>, terminator: u8) {
     output.push(ESCAPE);
     output.push(b']');
     output.extend_from_slice(kind);
-    output.push(b';');
-    output.extend_from_slice(text);
+    if let Some(text) = text {
+        output.push(b';');
+        output.extend_from_slice(text);
+    }
     if terminator == ESCAPE {
         output.push(ESCAPE);
         output.push(b'\\');
@@ -270,13 +283,27 @@ mod unix {
         // stop the reader below from ever seeing the tool exit.
         drop(device);
 
-        let raw = RawMode::enter()?;
-        install_resize_handler();
-        resize(controller.as_raw_fd());
+        let started = (|| {
+            let raw = RawMode::enter()?;
+            install_resize_handler();
+            resize(controller.as_raw_fd());
 
-        let status = forward(&controller, &profile.name, &mut child);
-        drop(raw);
-        status
+            let status = forward(&controller, &profile.name, &mut child);
+            drop(raw);
+            status
+        })();
+
+        // The caller answers a failure here by handing the terminal to the tool
+        // itself, so a tool this one already started has to be gone before it
+        // does: two copies of the same tool against one profile write over each
+        // other's session, and the one nothing is attached to would be
+        // invisible. Everything that can fail past this point has left the tool
+        // with a terminal nobody is reading, so there is nothing to keep.
+        if started.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        started
     }
 
     /// Copies between the terminal and the tool until the tool exits.
@@ -457,6 +484,15 @@ mod tests {
             "\x1b]2;ditto:work — Codex\x07"
         );
         assert_eq!(text(&[b"\x1b]1;omp\x07"]), "\x1b]1;ditto:work — omp\x07");
+    }
+
+    /// `OSC 104` resets the whole palette and `OSC 112` the cursor colour, and
+    /// neither carries an argument. Adding the separator they left out would
+    /// turn each into a request naming nothing, which the terminal ignores.
+    #[test]
+    fn forwards_a_command_that_carries_no_argument_as_it_stands() {
+        assert_eq!(filtered(&[b"\x1b]112\x07"]), b"\x1b]112\x07");
+        assert_eq!(filtered(&[b"\x1b]104\x1b\\"]), b"\x1b]104\x1b\\");
     }
 
     #[test]

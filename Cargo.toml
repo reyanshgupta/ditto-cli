@@ -1,10 +1,10 @@
 [package]
 name = "ditto-cli"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Reyansh Gupta"]
-description = "Switch between Claude Code, Codex, opencode, OMP, and Prime Agent accounts"
+description = "Switch between Claude Code, Codex, opencode, OMP, Prime Agent, Pi, and 29 more coding-agent accounts"
 license = "MIT"
 repository = "https://github.com/reyanshgupta/ditto-cli"
 homepage = "https://www.reyanshgupta.com/projects/ditto-cli"

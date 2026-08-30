@@ -202,6 +202,15 @@ jobs:
       contents: write
 
     steps:
+      # The notes are read out of the commits between this tag and the last,
+      # which needs the history and the tags, not just the tagged tree.
+      - name: Check out the history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Download release archives
         uses: actions/download-artifact@v8
         with:
@@ -212,6 +221,12 @@ jobs:
         working-directory: dist
         run: sha256sum * > SHA256SUMS
 
+      # GitHub's generated notes list merged pull requests, and commits land on
+      # main directly here, so they came out empty. The commit messages are
+      # written to be read, so the notes are made of them instead.
+      - name: Write release notes
+        run: .github/release-notes.sh "${RELEASE_TAG}" > "${RUNNER_TEMP}/notes.md"
+
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -221,9 +236,12 @@ jobs:
             gh release upload "${RELEASE_TAG}" dist/* \
               --clobber \
               --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${RELEASE_TAG}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              --repo "${GITHUB_REPOSITORY}"
           else
             gh release create "${RELEASE_TAG}" dist/* \
-              --generate-notes \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
               --title "${RELEASE_TAG}" \
               --verify-tag \
               --repo "${GITHUB_REPOSITORY}"

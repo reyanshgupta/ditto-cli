@@ -161,6 +161,8 @@ cargo clippy --all-targets -- -D warnings
 
 **Isolate accounts, share everything else.** A profile exists to be signed in as somebody else, not to be a different working environment. Credentials and session state stay in the profile; skills, subagents, commands, hooks, plugins and the memory files are linked back to the user's own configuration by `shared.rs`, so there is one copy edited in one place. That list is an allowlist and must stay one: teaching Ditto a new extension directory late costs a missing feature, and sharing a credential file by accident costs the isolation the tool exists for. Claude Code's `settings.json` is the one thing copied rather than linked, because Ditto writes the status line into it.
 
+**The README's screens are captures, not drawings.** `.github/readme-picker.py` runs a debug build in a pseudoterminal with stand-in agents and prints the two blocks the README shows; paste its output over them whenever the picker changes. Hand edits drift, and drifted once.
+
 **Cross-platform.** Windows is supported. Gate with `#[cfg(unix)]` / `#[cfg(windows)]`, and prefer `crossterm` over writing escape sequences directly. `program.rs` compiles on every platform even though only Windows calls it, on the reasoning that a rule nobody can exercise is a rule nobody checks — keep that property when touching it.
 
 **Profile names** are validated once, in `profile::validate_profile_name`, against the strictest tool: OMP takes the name verbatim and requires `^[a-z0-9][a-z0-9._-]{0,63}$`, rejecting trailing dots and Windows device names. Ditto applies those rules at creation so a name cannot be created that later fails only when OMP launches. Do not loosen this in one place.
@@ -205,7 +207,7 @@ git tag -a vX.Y.Z -m "Ditto CLI X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The workflow checks the tag against `cargo metadata`'s version and stops if they disagree, runs the suite on Linux, macOS and Windows, publishes with `cargo publish --locked`, builds the per-platform binaries, updates the Homebrew tap, and publishes the npm packages. Confirm the release landed rather than assuming the push was enough:
+The workflow checks the tag against `cargo metadata`'s version and stops if they disagree, runs the suite on Linux, macOS and Windows, publishes with `cargo publish --locked`, builds the per-platform binaries, updates the Homebrew tap, and publishes the npm packages. The release notes are the commit messages since the previous tag — subject as heading, body as text, the bump commit and trailers dropped — rendered by `.github/release-notes.sh`, because GitHub's own generated notes list pull requests and this repository has none. A commit body is therefore written for the person reading the release, not only the diff. Confirm the release landed rather than assuming the push was enough:
 
 ```bash
 gh run list --workflow=publish.yml --limit 1

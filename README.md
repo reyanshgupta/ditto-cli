@@ -29,24 +29,28 @@ Pick a profile, then a tool:
 │                        ││Sign-in status                                      │
 │                        ││Claude Code  ● Signed in                            │
 │                        ││Codex        ○ Sign in required                     │
-│                        ││fx           ○ Sign in required                     │
-│                        ││opencode     ⠹ Checking                             │
-│                        ││OMP          ○ Sign in required                     │
+│                        ││fx           ● Signed in                            │
+│                        ││opencode     ○ Sign in required                     │
+│                        ││OMP          ● Signed in                            │
 │                        ││Prime Agent  ● Signed in                            │
 │                        ││Pi           ○ Sign in required                     │
+│                        ││Gemini CLI   ● Signed in                            │
+│                        ││Grok         ○ Sign in required                     │
 │                        ││                                                    │
 │                        ││Profile directories                                 │
 │                        ││Claude Code  ~/.ditto/profiles/work/claude          │
 │                        ││Codex        ~/.ditto/profiles/work/codex           │
-│                        ││fx           …/work/fx-home/.fx                     │
-│                        ││opencode     …/work/opencode/data/opencode          │
+│                        ││fx           ~/.ditto/profiles/work/fx-home/.fx     │
+│                        ││opencode     …o/profiles/work/opencode/data/opencode│
 │                        ││OMP          ~/.omp/profiles/work/agent             │
 │                        ││Prime Agent  ~/.ditto/profiles/work/prime-agent     │
 │                        ││Pi           ~/.ditto/profiles/work/pi              │
+│                        ││Gemini CLI   …itto/profiles/work/gemini-home/.gemini│
+│                        ││Grok         ~/.ditto/profiles/work/grok            │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                 c Claude Code · x Codex · f fx · o opencode                  │
-│                     p OMP · a Prime · i Pi · ⏎ any tool                      │
+│                  c Claude Code · x Codex · f fx · o opencode                 │
+│                      p OMP · a Prime · i Pi · ⏎ any tool                     │
 │                   ↑↓ select · n new · e rename · d default                   │
 │                  l sign in · L sign out · r refresh · q quit                 │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -259,6 +263,47 @@ ditto-cli claude work
 | `q`, `Esc`, or `Ctrl+C` | Quit or close a dialog |
 
 Sign-in status is checked in the background, so the list stays responsive while each CLI is asked. A spinner marks the tools still being checked.
+
+`Enter` puts every installed agent in one list, narrowed as you type:
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│            Ditto CLI  choose a profile, then Enter to pick a tool            │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Profiles ──────────────┐┌ Selected profile ──────────────────────────────────┐
+│  default  existing     ││work  Isolated profile                              │
+│  personal              ││                                                    │
+│› work  ★               ││★ Used when no profile is named                     │
+│                        ││                                                    │
+│                        ││Sign-in status                                      │
+│                        ││Claude Code  ● Signed in                            │
+│                        ││Codex        ○ Sign in required                     │
+│       ┌ Launch in 'work' ────────────────────────────────────────────┐       │
+│       │› ▏                                                           │       │
+│       │                                                              │       │
+│       │Claude Code  ● Signed in                                      │       │
+│       │Codex        ○ Sign in required                               │       │
+│       │fx           ● Signed in                                      │       │
+│       │opencode     ○ Sign in required                               │       │
+│       │OMP          ● Signed in                                      │       │
+│       │Prime Agent  ● Signed in                                      │       │
+│       │Pi           ○ Sign in required                               │       │
+│       │Gemini CLI   ● Signed in                                      │       │
+│       │Grok         ○ Sign in required                               │fx     │
+│       │                                                              │pencode│
+│       │type to filter · ↑↓ · Enter launches · Esc                    │       │
+│       └──────────────────────────────────────────────────────────────┘nt     │
+│                        ││Pi           ~/.ditto/profiles/work/pi              │
+│                        ││Gemini CLI   …itto/profiles/work/gemini-home/.gemini│
+│                        ││Grok         ~/.ditto/profiles/work/grok            │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                  c Claude Code · x Codex · f fx · o opencode                 │
+│                      p OMP · a Prime · i Pi · ⏎ any tool                     │
+│                   ↑↓ select · n new · e rename · d default                   │
+│                  l sign in · L sign out · r refresh · q quit                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
 The selected profile is remembered for the next run. The `★` default is separate and stays put: it is the profile every command uses when you leave the name out, and running `ditto-cli claude personal` once does not move it. Any profile can be the default, including the built-in `default` one. See [which profile a command uses](#which-profile-a-command-uses).
 

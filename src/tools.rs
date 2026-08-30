@@ -11,8 +11,8 @@
 //!
 //! Every fact in an entry was read from the tool's own documentation or source
 //! rather than remembered, and the comment beside an entry says what was
-//! uncertain when it was written. The list is Orca's, which runs the same
-//! agents side by side and is where Ditto is most often asked to sit.
+//! uncertain when it was written. Any agent that runs in a terminal and can be
+//! pointed at a directory belongs here; add it when it appears.
 
 /// How a tool finds its directory, which is the one thing Ditto has to change
 /// to run it as somebody else.

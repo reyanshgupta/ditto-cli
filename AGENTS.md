@@ -1,6 +1,6 @@
 # Ditto CLI
 
-Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, fx, opencode, OMP, Prime Agent, Pi, and every other coding agent Orca runs (the table in `src/tools.rs`) in isolated profiles. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
+Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, fx, opencode, OMP, Prime Agent, Pi, and the other coding agents listed in `src/tools.rs` in isolated profiles. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
 
 This file is for agents and scripts. The first half is how to *drive* Ditto; the second half is how to *change* it. `CLAUDE.md` points here so there is one copy to keep true.
 

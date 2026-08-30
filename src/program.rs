@@ -31,6 +31,30 @@ pub fn resolve(name: &OsStr) -> OsString {
     name.to_owned()
 }
 
+/// Whether a command would start, without starting it. A tool that is not
+/// installed has no sign-in state worth asking for, and asking by running it
+/// would print the shell's own complaint into a status report.
+pub fn installed(name: &OsStr) -> bool {
+    let path = std::path::Path::new(name);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    #[cfg(windows)]
+    {
+        std::path::Path::new(&resolve(name)).is_file()
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|directory| {
+                std::fs::metadata(directory.join(name))
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
+        })
+    }
+}
+
 #[cfg(windows)]
 pub fn resolve(name: &OsStr) -> OsString {
     let path = env::var_os("PATH").unwrap_or_default();

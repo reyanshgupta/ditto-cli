@@ -1,12 +1,13 @@
 use std::{ffi::OsString, path::PathBuf};
 
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "ditto-cli",
     version,
-    about = "Launch Claude Code, Codex, opencode, OMP, Prime Agent, and Pi with isolated profiles"
+    about = "Launch Claude Code, Codex, fx, opencode, OMP, Prime Agent, Pi, and other coding agents with isolated profiles"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -59,6 +60,8 @@ pub enum Command {
     /// Launch Codex.
     #[command(visible_alias = "cx")]
     Codex(LaunchArgs),
+    /// Launch fx.
+    Fx(LaunchArgs),
     /// Launch opencode.
     #[command(visible_alias = "oc")]
     Opencode(LaunchArgs),
@@ -69,6 +72,12 @@ pub enum Command {
     PrimeAgent(LaunchArgs),
     /// Launch Pi.
     Pi(LaunchArgs),
+    /// Any other agent Ditto knows, by name: `ditto-cli gemini [profile] -- [args]`.
+    ///
+    /// The list is long and changes, so it is a table rather than a variant
+    /// each; `--help` prints it after the commands.
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
     /// Print shell functions that route the tools' own names through Ditto.
     ShellInit(ShellInitArgs),
     /// Show or change the profile indicator Claude Code displays.
@@ -282,9 +291,64 @@ pub struct LaunchArgs {
     pub args: Vec<OsString>,
 }
 
+/// The launch a tool named outside the subcommand list was asked for.
+///
+/// clap hands over the bare words, so this reads them the way [`LaunchArgs`]
+/// would have: at most a profile name, then `--` and the tool's own arguments.
+/// Whether the name is a tool at all is for the caller, which has the table.
+pub fn external_launch(argv: &[OsString]) -> Result<(String, LaunchArgs)> {
+    let Some((name, rest)) = argv.split_first() else {
+        bail!("no tool was named");
+    };
+    let name = name.to_string_lossy().into_owned();
+    let (positional, args) = match rest.iter().position(|word| word == "--") {
+        Some(separator) => (&rest[..separator], rest[separator + 1..].to_vec()),
+        None => (rest, Vec::new()),
+    };
+    let profile = match positional {
+        [] => None,
+        [profile] if !profile.to_string_lossy().starts_with('-') => {
+            Some(profile.to_string_lossy().into_owned())
+        }
+        _ => bail!(
+            "`ditto-cli {name}` takes at most a profile name; put {name}'s own arguments after `--`"
+        ),
+    };
+    Ok((name, LaunchArgs { profile, args }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_a_launch_of_a_tool_named_outside_the_subcommand_list() {
+        let cli =
+            Cli::try_parse_from(["ditto-cli", "gemini", "work", "--", "--model", "x"]).unwrap();
+        let Some(Command::Other(argv)) = cli.command else {
+            panic!("a name clap does not know should reach the table");
+        };
+        let (name, launch) = external_launch(&argv).unwrap();
+        assert_eq!(name, "gemini");
+        assert_eq!(launch.profile.as_deref(), Some("work"));
+        assert_eq!(
+            launch.args,
+            [OsString::from("--model"), OsString::from("x")]
+        );
+
+        let words = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let (_, launch) = external_launch(&words(&["gemini"])).unwrap();
+        assert_eq!(launch.profile, None);
+        assert!(launch.args.is_empty());
+        let (_, launch) = external_launch(&words(&["gemini", "--", "-p", "hi"])).unwrap();
+        assert_eq!(launch.profile, None);
+        assert_eq!(launch.args.len(), 2);
+
+        // Arguments meant for the tool come after `--`, as with every other
+        // launch; anything else before it is a mistake worth naming.
+        assert!(external_launch(&words(&["gemini", "--model", "x"])).is_err());
+        assert!(external_launch(&words(&["gemini", "work", "extra"])).is_err());
+    }
 
     #[test]
     fn parses_profile_rename_command() {

@@ -1,6 +1,6 @@
 # Ditto CLI
 
-Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, opencode, OMP, Prime Agent, and Pi profiles isolated. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
+Ditto CLI is a Rust terminal application for keeping Claude Code, Codex, fx, opencode, OMP, Prime Agent, Pi, and every other coding agent Orca runs (the table in `src/tools.rs`) in isolated profiles. It stores separate configuration and authentication roots for each profile, then launches the official CLIs with the selected profile environment. Users can manage profiles through either the Ratatui interface or equivalent command-line subcommands.
 
 This file is for agents and scripts. The first half is how to *drive* Ditto; the second half is how to *change* it. `CLAUDE.md` points here so there is one copy to keep true.
 
@@ -15,7 +15,7 @@ ditto-cli list --json
 ditto-cli --json list
 ```
 
-Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `opencode`, `omp`, `prime-agent`, `pi`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
+Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `fx`, `opencode`, `omp`, `prime-agent`, `pi`, and every key in `src/tools.rs`, as `ditto-cli gemini`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
 
 ### The config an agent can edit
 
@@ -101,7 +101,7 @@ These strings are an interface. Changing one breaks callers, so treat it as a de
 
 | Field | Values |
 | --- | --- |
-| `tools[].tool` | `claude`, `codex`, `opencode`, `omp`, `prime-agent`, `pi` |
+| `tools[].tool` | `claude`, `codex`, `fx`, `opencode`, `omp`, `prime-agent`, `pi`, then every `key` in `src/tools.rs` in its order |
 | `tools[].status` | `signed_in`, `signed_out`, `unavailable` |
 | `indicator.outcome` | `installed`, `already_on`, `alongside`, `removed`, `restored`, `off`, `foreign`, `shadowed` |
 | `profiles[].managed` | `false` only for the reserved `default` profile |
@@ -119,7 +119,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `main.rs` | Subcommand dispatch, and the human/JSON reporting for each. The picker's terminal guard. |
 | `cli.rs` | The clap types. Parsing only — no behaviour, no filesystem. |
 | `profile.rs` | `Store` and `Profile`: where a profile's directories are, creating, renaming, deleting, and `state.toml`. Also `write_private_file`, the atomic owner-only write everything else uses. |
-| `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. |
+| `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY`, herdr, and Orca (`ORCA_PANE_KEY`). |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
@@ -130,6 +130,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `herdr.rs` | Reading `HERDR_PANE_ID`, and reporting the profile to herdr as pane metadata. Why the proxy is skipped inside a herdr pane. |
 | `program.rs` | `PATH` lookup honouring `PATHEXT`, so npm's `claude.cmd` shims are found on Windows. |
 | `shell.rs` | The `shell-init` functions that route a tool's own name through Ditto, and reading `SHELL` to pick a dialect. |
+| `tools.rs` | The agents described by data rather than code: key, label, executable, how the home is relocated, credential files, shared paths, session directories, login arguments. Read by one `Tool::Generic` arm in each module. |
 | `update.rs` | `ditto-cli update`, which shells out to `cargo install`, or names the npm command when npm is what installed this copy. |
 
 ### Checks
@@ -176,6 +177,8 @@ cargo clippy --all-targets -- -D warnings
 6. Update `README.md` (the command-line usage section) and this file's tables if you added output keys.
 
 ### Adding a tool
+
+For an ordinary agent — one that keeps everything under a directory it names by a variable, under the XDG bases, or under `HOME` alone, and needs no behaviour of its own — add an entry to `tools::ALL` in `tools.rs` and nothing else. Its subcommand, shell function, status row, `paths` entry, allowlist, and history backfill all follow from the entry. Read every field off the agent's own documentation or source rather than from memory, and leave a comment beside the entry naming what was uncertain. The steps below are for a tool that needs code of its own.
 
 Extend `Tool` in `launch.rs`: `ALL`, `label`, `key`, `executable` (with its `DITTO_*_BIN` override), the status args in `auth_status`, and `AuthOperation::args`. Then give it a home in `Profile` and `Store::managed_profile`/`default_profile` in `profile.rs`, add it to `create_profile`'s directory list, and surface it in `paths`, `status`, and `ui.rs`. Add its configuration and extension paths to the allowlist in `shared.rs` and its credential and session paths to nothing, so a profile of the new tool starts as the same working environment signed in as somebody else. `shell.rs` needs nothing: it writes a function for every entry in `Tool::ALL`, and a test fails if one is missing.
 

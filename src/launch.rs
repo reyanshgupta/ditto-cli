@@ -12,8 +12,11 @@ use serde::Deserialize;
 
 use crate::{
     indicator,
-    profile::{LAUNCHED_TOOL_VARIABLE, NATIVE_ENVIRONMENT, Profile},
+    profile::{
+        LAUNCHED_TOOL_VARIABLE, NATIVE_ENVIRONMENT, NATIVE_HOME_ENVIRONMENT, Profile, preserved,
+    },
     program, shared,
+    tools::{self, Home},
 };
 
 /// OMP's per-profile store. It holds credentials alongside sessions and
@@ -24,31 +27,76 @@ const OMP_DATABASE: &str = "agent.db";
 pub enum Tool {
     Claude,
     Codex,
+    Fx,
     Opencode,
     Omp,
     PrimeAgent,
     Pi,
+    /// Any tool `tools.rs` describes. One arm per match reads the entry, so a
+    /// tool added there needs nothing added here.
+    Generic(&'static tools::Spec),
 }
 
 impl Tool {
-    /// Every tool Ditto CLI can launch, in the order they are presented.
-    pub const ALL: [Self; 6] = [
+    const BUILT_IN: [Self; 7] = [
         Self::Claude,
         Self::Codex,
+        Self::Fx,
         Self::Opencode,
         Self::Omp,
         Self::PrimeAgent,
         Self::Pi,
     ];
 
+    /// Every tool Ditto CLI can launch, in the order they are presented: the
+    /// built-in ones first, then the table in its own order.
+    pub const ALL: [Self; Self::BUILT_IN.len() + tools::ALL.len()] = Self::all();
+
+    const fn all() -> [Self; Self::BUILT_IN.len() + tools::ALL.len()] {
+        let mut all = [Self::Claude; Self::BUILT_IN.len() + tools::ALL.len()];
+        let mut index = 0;
+        while index < Self::BUILT_IN.len() {
+            all[index] = Self::BUILT_IN[index];
+            index += 1;
+        }
+        let mut described = 0;
+        while described < tools::ALL.len() {
+            all[index + described] = Self::Generic(&tools::ALL[described]);
+            described += 1;
+        }
+        all
+    }
+
+    /// Position in [`Self::ALL`], for state kept per tool without a field per
+    /// tool.
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|tool| *tool == self)
+            .expect("every Tool is an entry of Tool::ALL")
+    }
+
+    /// The tool a subcommand or a shell function names, if there is one.
+    pub fn by_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tool| tool.key() == key)
+    }
+
+    /// Whether the executable would be found, honouring the `DITTO_*_BIN`
+    /// override the same way a launch does.
+    pub fn installed(self) -> bool {
+        program::installed(&self.executable())
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Fx => "fx",
             Self::Opencode => "opencode",
             Self::Omp => "OMP",
             Self::PrimeAgent => "Prime Agent",
             Self::Pi => "Pi",
+            Self::Generic(spec) => spec.label,
         }
     }
 
@@ -62,10 +110,12 @@ impl Tool {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Fx => "fx",
             Self::Opencode => "opencode",
             Self::Omp => "omp",
             Self::PrimeAgent => "prime-agent",
             Self::Pi => "pi",
+            Self::Generic(spec) => spec.key,
         }
     }
 
@@ -73,18 +123,22 @@ impl Tool {
         let override_variable = match self {
             Self::Claude => "DITTO_CLAUDE_BIN",
             Self::Codex => "DITTO_CODEX_BIN",
+            Self::Fx => "DITTO_FX_BIN",
             Self::Opencode => "DITTO_OPENCODE_BIN",
             Self::Omp => "DITTO_OMP_BIN",
             Self::PrimeAgent => "DITTO_PRIME_AGENT_BIN",
             Self::Pi => "DITTO_PI_BIN",
+            Self::Generic(spec) => spec.bin_variable,
         };
         std::env::var_os(override_variable).unwrap_or_else(|| match self {
             Self::Claude => OsString::from("claude"),
             Self::Codex => OsString::from("codex"),
+            Self::Fx => OsString::from("fx"),
             Self::Opencode => OsString::from("opencode"),
             Self::Omp => OsString::from("omp"),
             Self::PrimeAgent => OsString::from("prime-agent"),
             Self::Pi => OsString::from("pi"),
+            Self::Generic(spec) => OsString::from(spec.executable),
         })
     }
 }
@@ -107,18 +161,22 @@ impl AuthOperation {
         match (self, tool) {
             (Self::Login, Tool::Claude) => Some(&["auth", "login"]),
             (Self::Login, Tool::Codex) => Some(&["login"]),
+            (Self::Login, Tool::Fx) => Some(&["login"]),
             (Self::Login, Tool::Opencode) => Some(&["auth", "login"]),
             // Prime Agent treats an initial slash command exactly as if it was
             // typed into the editor, so this opens the login dialog directly.
             (Self::Login, Tool::PrimeAgent) => Some(&["/login"]),
             (Self::Logout, Tool::Claude) => Some(&["auth", "logout"]),
             (Self::Logout, Tool::Codex) => Some(&["logout"]),
+            (Self::Logout, Tool::Fx) => Some(&["logout"]),
             (Self::Logout, Tool::Opencode) => Some(&["auth", "logout"]),
             (Self::Logout, Tool::PrimeAgent) => Some(&["/logout"]),
             // OMP and Pi expose authentication only inside their interfaces.
             // Their sign-in state is still readable, so they report status
             // without being signable in or out here.
             (_, Tool::Omp | Tool::Pi) => None,
+            (Self::Login, Tool::Generic(spec)) => spec.login,
+            (Self::Logout, Tool::Generic(spec)) => spec.logout,
         }
     }
 }
@@ -147,6 +205,11 @@ struct ClaudeAuthStatus {
     logged_in: bool,
 }
 
+#[derive(Deserialize)]
+struct FxAuthStatus {
+    auth: String,
+}
+
 pub fn build_command(tool: Tool, profile: &Profile, args: &[OsString]) -> Command {
     let mut command = base_command(tool, profile);
     command.args(args);
@@ -157,12 +220,14 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
     let status_args: &[&str] = match tool {
         Tool::Claude => &["auth", "status", "--json"],
         Tool::Codex => &["login", "status"],
+        Tool::Fx => &["status", "--json"],
         Tool::Opencode => &["auth", "list"],
         // These tools have no status command to ask. Ditto reads the stores
         // their in-app login flows write instead.
         Tool::Omp => return omp_auth_status(profile),
         Tool::PrimeAgent => return prime_agent_auth_status(profile),
         Tool::Pi => return pi_auth_status(profile),
+        Tool::Generic(spec) => return generic_auth_status(tool, spec, profile),
     };
 
     let output = base_command(tool, profile)
@@ -180,8 +245,9 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
         Tool::Codex => {
             parse_codex_auth_status(output.status.success(), &output.stdout, &output.stderr)
         }
+        Tool::Fx => parse_fx_auth_status(output.status.success(), &output.stdout),
         Tool::Opencode => parse_opencode_auth_status(output.status.success(), &output.stdout),
-        Tool::Omp | Tool::PrimeAgent | Tool::Pi => {
+        Tool::Omp | Tool::PrimeAgent | Tool::Pi | Tool::Generic(_) => {
             unreachable!("file-based auth status returned before command execution")
         }
     }
@@ -191,6 +257,25 @@ pub fn auth_status(tool: Tool, profile: &Profile) -> AuthStatus {
 /// as holding no credentials. Anything else that goes wrong is reported as
 /// unavailable rather than guessed at: OMP owns this schema, and a future
 /// release is free to change it.
+/// Read from files rather than asked, since nothing in the table promises a
+/// status command. A tool that is not installed is unavailable rather than
+/// signed out, so a profile is not told to sign in to thirty tools it does not
+/// have; so is one whose login lives somewhere Ditto has no file to read.
+fn generic_auth_status(tool: Tool, spec: &'static tools::Spec, profile: &Profile) -> AuthStatus {
+    if !tool.installed() || spec.credentials.is_empty() {
+        return AuthStatus::Unavailable;
+    }
+    if spec
+        .credentials
+        .iter()
+        .any(|name| profile.tool_path(spec, name).exists())
+    {
+        AuthStatus::SignedIn
+    } else {
+        AuthStatus::SignedOut
+    }
+}
+
 fn omp_auth_status(profile: &Profile) -> AuthStatus {
     let database = profile.omp_home.join(OMP_DATABASE);
     if !database.exists() {
@@ -275,6 +360,17 @@ fn parse_codex_auth_status(success: bool, stdout: &[u8], stderr: &[u8]) -> AuthS
         AuthStatus::SignedOut
     } else {
         AuthStatus::Unavailable
+    }
+}
+
+fn parse_fx_auth_status(success: bool, stdout: &[u8]) -> AuthStatus {
+    if !success {
+        return AuthStatus::Unavailable;
+    }
+    match serde_json::from_slice::<FxAuthStatus>(stdout) {
+        Ok(status) if status.auth == "missing" => AuthStatus::SignedOut,
+        Ok(_) => AuthStatus::SignedIn,
+        Err(_) => AuthStatus::Unavailable,
     }
 }
 
@@ -364,6 +460,17 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
         Tool::Codex => {
             command.env("CODEX_HOME", &profile.codex_home);
         }
+        Tool::Fx => {
+            if profile.managed {
+                // fx has no state-root override and resolves every private path
+                // below `$HOME/.fx`. The private home isolates those files. On
+                // macOS its Keychain entries are user-wide, so managed profiles
+                // deliberately select the profile-file backend instead.
+                command
+                    .env("HOME", &profile.fx_home)
+                    .env("FX_DISABLE_KEYCHAIN", "1");
+            }
+        }
         Tool::Opencode => {
             command
                 .env("XDG_DATA_HOME", &profile.opencode.data)
@@ -403,6 +510,27 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
                 );
             }
         }
+        Tool::Generic(spec) => {
+            match spec.home {
+                Home::Variable { variable, .. } | Home::Parent { variable, .. } => {
+                    command.env(variable, profile.tool_home(spec));
+                }
+                Home::Xdg { .. } => {
+                    command
+                        .env("XDG_DATA_HOME", profile.xdg_base(spec, "data"))
+                        .env("XDG_CONFIG_HOME", profile.xdg_base(spec, "config"))
+                        .env("XDG_STATE_HOME", profile.xdg_base(spec, "state"));
+                }
+                Home::Private { .. } => {
+                    if profile.managed {
+                        command.env("HOME", profile.tool_home(spec));
+                    }
+                }
+            }
+            if profile.managed {
+                command.envs(spec.managed_env.iter().copied());
+            }
+        }
     }
     command
 }
@@ -425,6 +553,19 @@ fn preserve_native_environment(command: &mut Command) {
             command.env(preserved, value);
         }
     }
+    for spec in tools::ALL {
+        if let Home::Variable { variable, .. } | Home::Parent { variable, .. } = spec.home
+            && std::env::var_os(preserved(variable)).is_none()
+            && let Some(value) = std::env::var_os(variable)
+        {
+            command.env(preserved(variable), value);
+        }
+    }
+    if std::env::var_os(NATIVE_HOME_ENVIRONMENT.1).is_none()
+        && let Some(value) = std::env::var_os(NATIVE_HOME_ENVIRONMENT.0)
+    {
+        command.env(NATIVE_HOME_ENVIRONMENT.1, value);
+    }
 }
 
 /// Set to step out of the way and hand the terminal straight to the tool. The
@@ -432,6 +573,24 @@ fn preserve_native_environment(command: &mut Command) {
 /// underneath Ditto ever causes trouble.
 #[cfg(unix)]
 const NO_PROXY_VARIABLE: &str = "DITTO_NO_PROXY";
+
+/// Set by Orca in every terminal it opens, and read for the reason
+/// `HERDR_PANE_ID` is. Orca works out which agent a pane is running from the
+/// pane's foreground process and from the title the agent writes, with its
+/// Claude Code rules anchored to the first character, and it holds a prompt
+/// back until the foreground process is the agent it launched. A proxy fails
+/// all three at once. Unlike herdr, Orca has no command that labels an
+/// existing pane, so there is nowhere to report the profile instead; Claude
+/// Code's status line still names it.
+#[cfg(unix)]
+const ORCA_PANE_VARIABLE: &str = "ORCA_PANE_KEY";
+
+/// A variable set to nothing is not an Orca terminal. Orca never sets it
+/// empty, but a shell that exported it around a launch will.
+#[cfg(unix)]
+fn inside_orca() -> bool {
+    std::env::var_os(ORCA_PANE_VARIABLE).is_some_and(|pane| !pane.is_empty())
+}
 
 /// Puts the profile in front of the user before the tool takes the terminal.
 /// Claude Code gets a status line inside its own interface; the rest get the
@@ -449,16 +608,18 @@ fn show_profile(tool: Tool, profile: &Profile) {
 /// Rewriting the title only means anything on a real terminal, so redirected
 /// output is handed over untouched.
 ///
-/// herdr is the other way out. It reads both the foreground process and the
-/// title to work out which agent is in a pane and what it is doing, and a
-/// proxy costs it both answers, so under herdr the title is not Ditto's to
-/// take. `herdr::report_profile` says the same thing where herdr will show it.
+/// herdr and Orca are the other ways out. Both read the foreground process and
+/// the title to work out which agent is in a pane and what it is doing, and a
+/// proxy costs them both answers, so under either the title is not Ditto's to
+/// take. `herdr::report_profile` says the same thing where herdr will show it;
+/// Orca has nowhere to say it.
 #[cfg(unix)]
 fn proxy_wanted() -> bool {
     use std::io::IsTerminal;
 
     std::env::var_os(NO_PROXY_VARIABLE).is_none()
         && crate::herdr::pane().is_none()
+        && !inside_orca()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
 }
@@ -610,6 +771,7 @@ mod tests {
             name: "work".to_owned(),
             claude_home: PathBuf::from("/profiles/work/claude"),
             codex_home: PathBuf::from("/profiles/work/codex"),
+            fx_home: PathBuf::from("/profiles/work/fx-home"),
             omp_home: PathBuf::from("/omp/profiles/work/agent"),
             opencode: OpencodeHome {
                 data: PathBuf::from("/profiles/work/opencode/data"),
@@ -618,6 +780,7 @@ mod tests {
             },
             pi_home: PathBuf::from("/profiles/work/pi"),
             prime_agent_home: PathBuf::from("/profiles/work/prime-agent"),
+            generic: Vec::new(),
             managed: true,
         }
     }
@@ -649,6 +812,22 @@ mod tests {
             Some(std::ffi::OsStr::new("/profiles/work/codex"))
         );
     }
+    #[test]
+    fn fx_uses_a_private_home_and_profile_file_credentials() {
+        let profile = profile();
+        let command = build_command(Tool::Fx, &profile, &[]);
+        let environment = command.get_envs().collect::<Vec<_>>();
+
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("HOME"),
+            Some(profile.fx_home.as_os_str())
+        )));
+        assert!(environment.contains(&(
+            std::ffi::OsStr::new("FX_DISABLE_KEYCHAIN"),
+            Some(std::ffi::OsStr::new("1"))
+        )));
+    }
+
     #[test]
     fn opencode_pins_every_xdg_base_that_holds_account_state() {
         let command = build_command(Tool::Opencode, &profile(), &[]);
@@ -767,9 +946,106 @@ mod tests {
     #[test]
     fn stable_tool_keys_include_every_agent() {
         assert_eq!(
-            Tool::ALL.map(Tool::key),
-            ["claude", "codex", "opencode", "omp", "prime-agent", "pi"]
+            Tool::BUILT_IN.map(Tool::key),
+            [
+                "claude",
+                "codex",
+                "fx",
+                "opencode",
+                "omp",
+                "prime-agent",
+                "pi"
+            ]
         );
+        // The table follows in its own order, so a status report and the
+        // picker list tools the same way the table does.
+        assert_eq!(
+            Tool::ALL[Tool::BUILT_IN.len()..]
+                .iter()
+                .map(|tool| tool.key())
+                .collect::<Vec<_>>(),
+            tools::ALL.iter().map(|spec| spec.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// Every entry of the table is pointed at the profile the way its own
+    /// `home` says, and nothing it is pointed at lies outside the profile.
+    #[test]
+    fn table_tools_are_pointed_at_the_profile_their_entry_describes() -> anyhow::Result<()> {
+        use std::collections::HashMap;
+
+        use crate::profile::Store;
+
+        let dir = tempfile::tempdir()?;
+        let store = Store::new(dir.path().join(".ditto"), dir.path().to_path_buf());
+        let profile = store.create_profile("work")?;
+        for tool in Tool::ALL {
+            let Tool::Generic(spec) = tool else { continue };
+            let command = build_command(tool, &profile, &[]);
+            let environment: HashMap<_, _> = command
+                .get_envs()
+                .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value.to_owned())))
+                .collect();
+            let pointed_at = |name: &str| {
+                environment
+                    .get(std::ffi::OsStr::new(name))
+                    .map(PathBuf::from)
+            };
+            match spec.home {
+                Home::Variable { variable, .. } | Home::Parent { variable, .. } => {
+                    assert_eq!(
+                        pointed_at(variable),
+                        Some(profile.tool_home(spec).to_path_buf()),
+                        "{}",
+                        spec.key
+                    );
+                }
+                Home::Xdg { .. } => {
+                    assert_eq!(
+                        pointed_at("XDG_CONFIG_HOME"),
+                        Some(profile.xdg_base(spec, "config")),
+                        "{}",
+                        spec.key
+                    );
+                    assert_eq!(
+                        pointed_at("XDG_DATA_HOME"),
+                        Some(profile.xdg_base(spec, "data")),
+                        "{}",
+                        spec.key
+                    );
+                }
+                Home::Private { .. } => {
+                    assert_eq!(
+                        pointed_at("HOME"),
+                        Some(profile.tool_home(spec).to_path_buf()),
+                        "{}",
+                        spec.key
+                    );
+                }
+            }
+            for (name, value) in spec.managed_env {
+                assert_eq!(
+                    environment
+                        .get(std::ffi::OsStr::new(name))
+                        .map(|v| v.to_string_lossy().into_owned())
+                        .as_deref(),
+                    Some(*value),
+                    "{}",
+                    spec.key
+                );
+            }
+            assert!(
+                profile.tool_root(spec).starts_with(dir.path()),
+                "{} escapes the profile",
+                spec.key
+            );
+            assert!(
+                profile.tool_root(spec).is_dir() || matches!(spec.home, Home::Xdg { .. }),
+                "{} was not created",
+                spec.key
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -788,6 +1064,14 @@ mod tests {
         );
         assert_eq!(
             AuthOperation::Logout.args(Tool::Codex),
+            Some(["logout"].as_slice())
+        );
+        assert_eq!(
+            AuthOperation::Login.args(Tool::Fx),
+            Some(["login"].as_slice())
+        );
+        assert_eq!(
+            AuthOperation::Logout.args(Tool::Fx),
             Some(["logout"].as_slice())
         );
         assert_eq!(
@@ -901,6 +1185,23 @@ mod tests {
         assert_eq!(strip_ansi("plain"), "plain");
         // An unterminated sequence must not swallow the rest of the buffer.
         assert_eq!(strip_ansi("a\u{1b}Xb"), "ab");
+    }
+
+    #[test]
+    fn parses_fx_auth_status_output() {
+        assert_eq!(
+            parse_fx_auth_status(true, br#"{"kind":"status","auth":"missing"}"#),
+            AuthStatus::SignedOut
+        );
+        assert_eq!(
+            parse_fx_auth_status(true, br#"{"kind":"status","auth":"Codex subscription"}"#),
+            AuthStatus::SignedIn
+        );
+        assert_eq!(parse_fx_auth_status(false, b"{}"), AuthStatus::Unavailable);
+        assert_eq!(
+            parse_fx_auth_status(true, b"not json"),
+            AuthStatus::Unavailable
+        );
     }
 
     #[test]

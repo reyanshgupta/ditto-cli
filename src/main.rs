@@ -10,6 +10,7 @@ mod proxy;
 mod settings;
 mod shared;
 mod shell;
+mod tools;
 mod ui;
 mod update;
 mod workspace;
@@ -20,7 +21,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use serde_json::{Value, json};
 
 use cli::{
@@ -35,7 +36,10 @@ use workspace::{WORKSPACE_FILE, Workspaces};
 fn main() {
     restore_sigpipe();
 
-    let cli = Cli::parse();
+    // The table's tools share one subcommand between them, so `--help` names
+    // them here rather than nowhere.
+    let matches = Cli::command().after_help(other_agents_help()).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     // Read before the command is consumed, so a failure can answer in the shape
     // the caller asked for rather than dropping to prose halfway through.
     let json = cli.json;
@@ -48,6 +52,21 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+fn other_agents_help() -> String {
+    let names = tools::ALL
+        .iter()
+        .map(|spec| spec.key)
+        .collect::<Vec<_>>()
+        .chunks(6)
+        .map(|row| row.join(", "))
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    format!(
+        "Other agents, launched the same way as the commands above \
+         (`ditto-cli <agent> [profile] -- [args]`):\n  {names}"
+    )
 }
 
 /// Ends quietly when the reader of Ditto's output goes away.
@@ -100,6 +119,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Codex(arguments)) => {
             launch_direct(&store, &workspaces, Tool::Codex, arguments)
         }
+        Some(Command::Fx(arguments)) => launch_direct(&store, &workspaces, Tool::Fx, arguments),
         Some(Command::Opencode(arguments)) => {
             launch_direct(&store, &workspaces, Tool::Opencode, arguments)
         }
@@ -108,6 +128,15 @@ fn run(cli: Cli) -> Result<()> {
             launch_direct(&store, &workspaces, Tool::PrimeAgent, arguments)
         }
         Some(Command::Pi(arguments)) => launch_direct(&store, &workspaces, Tool::Pi, arguments),
+        Some(Command::Other(argv)) => {
+            let (name, arguments) = cli::external_launch(&argv)?;
+            let Some(tool) = Tool::by_key(&name) else {
+                bail!(
+                    "'{name}' is not a Ditto command or an agent it launches; run `ditto-cli --help`"
+                );
+            };
+            launch_direct(&store, &workspaces, tool, arguments)
+        }
         Some(Command::ShellInit(arguments)) => print_shell_init(arguments),
         Some(Command::Indicator(arguments)) => set_indicator(&store, &workspaces, arguments, json),
         Some(Command::Statusline(arguments)) => {
@@ -258,6 +287,11 @@ fn show_status(
         || {
             println!("{}", profile.name);
             for (tool, status) in &statuses {
+                // JSON keeps every tool so the shape is stable; a person is
+                // shown the agents they have, not every one Ditto knows.
+                if matches!(tool, Tool::Generic(_)) && *status == AuthStatus::Unavailable {
+                    continue;
+                }
                 print_auth_status(*tool, *status);
             }
         },
@@ -294,9 +328,10 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             created["created"] = json!(true);
             created["settings_copied"] = json!(copied.copied);
             created["shared"] = json!(linked.linked);
-            created["sign_in"] = json!({
+            let mut sign_in = json!({
                 "claude": format!("ditto-cli claude {} -- auth login", profile.name),
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
+                "fx": format!("ditto-cli fx {} -- login", profile.name),
                 "opencode": format!("ditto-cli opencode {} -- auth login", profile.name),
                 "omp": format!("ditto-cli omp {} (then /login inside OMP)", profile.name),
                 "prime-agent": format!(
@@ -305,6 +340,21 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
                 ),
                 "pi": format!("ditto-cli pi {} (then /login inside Pi)", profile.name),
             });
+            for spec in tools::ALL {
+                sign_in[spec.key] = json!(match spec.login {
+                    Some(login) => format!(
+                        "ditto-cli {} {} -- {}",
+                        spec.key,
+                        profile.name,
+                        login.join(" ")
+                    ),
+                    None => format!(
+                        "ditto-cli {} {} (then sign in inside {})",
+                        spec.key, profile.name, spec.label
+                    ),
+                });
+            }
+            created["sign_in"] = sign_in;
             created["preserve_history"] = json!({
                 "this_profile": format!("ditto-cli sync {} --history", profile.name),
                 "all_profiles": "ditto-cli sync --all --history",
@@ -728,6 +778,7 @@ fn show_paths(
             println!("profile={}", profile.name);
             println!("claude={}", profile.claude_home.display());
             println!("codex={}", profile.codex_home.display());
+            println!("fx={}", profile.fx_dir().display());
             println!("opencode={}", profile.opencode.data_dir().display());
             println!(
                 "opencode-config={}",
@@ -736,6 +787,9 @@ fn show_paths(
             println!("omp={}", profile.omp_home.display());
             println!("prime-agent={}", profile.prime_agent_home.display());
             println!("pi={}", profile.pi_home.display());
+            for spec in tools::ALL {
+                println!("{}={}", spec.key, profile.tool_root(spec).display());
+            }
         },
     );
     Ok(())
@@ -744,17 +798,22 @@ fn show_paths(
 /// The directories a profile owns, in the shape both `paths` and `create`
 /// report them.
 fn profile_paths(profile: &Profile) -> Value {
-    json!({
+    let mut paths = json!({
         "profile": profile.name,
         "managed": profile.managed,
         "claude": profile.claude_home.display().to_string(),
         "codex": profile.codex_home.display().to_string(),
+        "fx": profile.fx_dir().display().to_string(),
         "opencode": profile.opencode.data_dir().display().to_string(),
         "opencode_config": profile.opencode.config_dir().display().to_string(),
         "omp": profile.omp_home.display().to_string(),
         "prime_agent": profile.prime_agent_home.display().to_string(),
         "pi": profile.pi_home.display().to_string(),
-    })
+    });
+    for spec in tools::ALL {
+        paths[spec.key.replace('-', "_")] = json!(profile.tool_root(spec).display().to_string());
+    }
+    paths
 }
 
 fn launch_direct(
@@ -1124,17 +1183,24 @@ fn current_directory() -> Result<PathBuf> {
 fn print_login_instructions(profile: &Profile) {
     println!();
     println!(
-        "Open `ditto-cli`, select '{}', then press l to sign in to Claude Code, Codex, opencode, or Prime Agent.",
+        "Open `ditto-cli`, select '{}', then press l to sign in to Claude Code, Codex, fx, opencode, or Prime Agent.",
         profile.name
     );
     println!();
     println!("Or authenticate directly:");
     println!("  ditto-cli claude {} -- auth login", profile.name);
     println!("  ditto-cli codex {} -- login", profile.name);
+    println!("  ditto-cli fx {} -- login", profile.name);
     println!("  ditto-cli opencode {} -- auth login", profile.name);
     println!("  ditto-cli prime-agent {} -- /login", profile.name);
     println!();
     println!("Launch OMP or Pi, then use `/login` inside it:");
     println!("  ditto-cli omp {}", profile.name);
     println!("  ditto-cli pi {}", profile.name);
+    println!();
+    println!("Every other agent runs the same way; `ditto-cli --help` lists them:");
+    println!(
+        "  ditto-cli <agent> {} -- <its login arguments>",
+        profile.name
+    );
 }

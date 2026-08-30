@@ -34,6 +34,7 @@ use anyhow::{Context, Result};
 use crate::{
     launch::Tool,
     profile::{DEFAULT_PROFILE, Profile, Store},
+    tools::{self, Home},
 };
 
 /// Where a directory a profile already had is moved when the user asks Ditto to
@@ -71,6 +72,12 @@ const CODEX: &[&str] = &[
     "AGENTS.md",
     "instructions.md",
 ];
+
+/// fx reads all local state below `$HOME/.fx`. These paths are reusable user
+/// preferences and capabilities. Provider logins, MCP configuration and OAuth
+/// credentials, sessions, prompt history, usage, traces, and recordings are
+/// deliberately absent and remain in the selected profile.
+const FX: &[&str] = &["settings.json", "AGENTS.md", "skills", "memories.json"];
 
 /// The same for OMP, relative to the per-profile agent directory OMP keeps.
 /// Its `agent.db` holds credentials beside sessions and never moves.
@@ -155,6 +162,34 @@ struct Borrowed {
 /// deleted either way.
 pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
     let mut result = Linked::default();
+    // Nothing the profile itself lives in is the user's configuration to
+    // mirror: linked into the profile's private home, such a directory would
+    // make the profile contain itself. Ditto's store is the obvious case, and
+    // OMP's per-profile root under `~/.omp` the less obvious one.
+    let holds_profile = target.directories();
+    mirror_home(
+        "fx/home",
+        &source.fx_home,
+        &target.fx_home,
+        &[".fx"],
+        &holds_profile,
+        &mut result,
+    );
+    for spec in tools::ALL {
+        if let Home::Private { native, owned } = spec.home {
+            let keep = std::iter::once(native)
+                .chain(owned.iter().copied())
+                .collect::<Vec<_>>();
+            mirror_home(
+                &format!("{}/home", spec.key),
+                source.tool_home(spec),
+                target.tool_home(spec),
+                &keep,
+                &holds_profile,
+                &mut result,
+            );
+        }
+    }
     for borrowed in plan(source, target) {
         // A path the user does not have is not a path to share. Linking it
         // anyway would leave a profile pointing at nothing, which every tool
@@ -187,6 +222,107 @@ pub fn seed(store: &Store, profile: &Profile) -> Linked {
     match store.load_profile(DEFAULT_PROFILE) {
         Ok(source) => link(&source, profile, false).unwrap_or_default(),
         Err(_) => Linked::default(),
+    }
+}
+
+/// Gives a tool's private HOME the same top-level view as the user's real
+/// HOME, except for the tool's own directory. A tool with no state-root
+/// override can only be isolated by changing HOME, and without this facade
+/// that would also hide the user's shell startup files, Git configuration, SSH
+/// setup, and toolchains from every command the agent runs.
+///
+/// `keep` names what is the tool's own and so is not mirrored: its directory,
+/// and anything else in the home that carries its account. A kept path may be
+/// nested, as `.config/manicode` is; the directory holding it is then made real
+/// and mirrored one level further down, so that the one entry is the profile's
+/// while the rest of `.config` stays the user's.
+///
+/// Existing entries are never replaced here, even under `--adopt`: they may
+/// have been written while an older managed profile was active and are profile
+/// state, not reusable configuration. Individual failures are reported, while
+/// the many successful facade links are summarized as one `<label>` entry.
+fn mirror_home(
+    label: &str,
+    from: &Path,
+    into: &Path,
+    keep: &[&str],
+    holds_profile: &[&Path],
+    result: &mut Linked,
+) {
+    if from == into {
+        return;
+    }
+    let entries = match fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(error) => {
+            result
+                .failed
+                .push((label.to_owned(), format!("could not read home: {error}")));
+            return;
+        }
+    };
+
+    let mut visible = false;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                result.failed.push((
+                    label.to_owned(),
+                    format!("could not read a home entry: {error}"),
+                ));
+                continue;
+            }
+        };
+        if holds_profile
+            .iter()
+            .any(|directory| directory.starts_with(entry.path()))
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        let entry_label = format!("{label}/{name}");
+        let nested = keep
+            .iter()
+            .filter_map(|kept| kept.strip_prefix(name.as_str())?.strip_prefix('/'))
+            .collect::<Vec<_>>();
+        if !nested.is_empty() {
+            let inner = into.join(entry.file_name());
+            match fs::create_dir_all(&inner) {
+                Ok(()) => mirror_home(
+                    &entry_label,
+                    &entry.path(),
+                    &inner,
+                    &nested,
+                    holds_profile,
+                    result,
+                ),
+                Err(error) => result
+                    .failed
+                    .push((entry_label, format!("could not create: {error}"))),
+            }
+            continue;
+        }
+        let borrowed = Borrowed {
+            label: entry_label.clone(),
+            from: entry.path(),
+            into: into.join(entry.file_name()),
+        };
+        match attach(&borrowed, false) {
+            Ok(Outcome::Created) => {
+                visible = true;
+                result.changed = true;
+            }
+            Ok(Outcome::Already) => visible = true,
+            Ok(Outcome::Kept) => {}
+            Err(error) => result.failed.push((entry_label, format!("{error:#}"))),
+        }
+    }
+    if visible {
+        result.linked.push(label.to_owned());
     }
 }
 
@@ -233,6 +369,13 @@ fn paths(profile: &Profile) -> Vec<Owned> {
             path: profile.codex_home.join(name),
         });
     }
+    for name in FX {
+        paths.push(Owned {
+            tool: Tool::Fx,
+            label: format!("fx/{name}"),
+            path: profile.fx_dir().join(name),
+        });
+    }
     // opencode keeps configuration and credentials in different XDG bases
     // already, so the whole configuration directory can be shared as one link
     // and the data directory holding `auth.json` stays untouched.
@@ -261,6 +404,15 @@ fn paths(profile: &Profile) -> Vec<Owned> {
             label: format!("pi/{name}"),
             path: profile.pi_home.join(name),
         });
+    }
+    for spec in tools::ALL {
+        for name in spec.shared {
+            paths.push(Owned {
+                tool: Tool::Generic(spec),
+                label: format!("{}/{name}", spec.key),
+                path: profile.tool_path(spec, name),
+            });
+        }
     }
     paths
 }
@@ -671,6 +823,11 @@ mod tests {
             "projects",
             "history.jsonl",
             "auth.json",
+            "chatgpt-auth.json",
+            "grok-auth.json",
+            "api-key",
+            "mcp.json",
+            "mcp-credentials",
             "oauth.json",
             "account.json",
             "agent.db",
@@ -684,9 +841,11 @@ mod tests {
             assert!(
                 !CLAUDE.contains(&name)
                     && !CODEX.contains(&name)
+                    && !FX.contains(&name)
                     && !OMP.contains(&name)
                     && !PRIME_AGENT.contains(&name)
-                    && !PI.contains(&name),
+                    && !PI.contains(&name)
+                    && !tools::ALL.iter().any(|spec| spec.shared.contains(&name)),
                 "'{name}' carries an account and must not be shared between profiles"
             );
         }

@@ -101,6 +101,7 @@ mod tests {
             name: "work".to_owned(),
             claude_home: PathBuf::from("/profiles/work/claude"),
             codex_home: PathBuf::from("/profiles/work/codex"),
+            fx_home: PathBuf::from("/profiles/work/fx-home"),
             omp_home: PathBuf::from("/omp/profiles/work/agent"),
             opencode: OpencodeHome {
                 data: PathBuf::from("/profiles/work/opencode/data"),
@@ -109,6 +110,7 @@ mod tests {
             },
             pi_home: PathBuf::from("/profiles/work/pi"),
             prime_agent_home: PathBuf::from("/profiles/work/prime-agent"),
+            generic: Vec::new(),
             managed: true,
         }
     }

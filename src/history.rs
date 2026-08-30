@@ -15,6 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::{
     launch::{self, Tool},
     profile::{Profile, secure_directory, write_private_bytes},
+    tools,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -63,6 +64,14 @@ pub fn backfill(source: &Profile, target: &Profile) -> Result<Backfilled> {
     }
     result.tools.push((Tool::Codex, codex));
 
+    let mut fx = Counts::default();
+    copy_tree(
+        &source.fx_dir().join("sessions"),
+        &target.fx_dir().join("sessions"),
+        &mut fx,
+    )?;
+    result.tools.push((Tool::Fx, fx));
+
     result
         .tools
         .push((Tool::Opencode, backfill_opencode(source, target)?));
@@ -88,6 +97,22 @@ pub fn backfill(source: &Profile, target: &Profile) -> Result<Backfilled> {
     result.tools.push((Tool::PrimeAgent, prime_agent));
 
     result.tools.push((Tool::Pi, backfill_pi(source, target)?));
+    // Every entry here is printed, so the table's tools appear only when they
+    // had something to copy; thirty lines saying nothing moved would bury the
+    // ones that did.
+    for spec in tools::ALL {
+        let mut counts = Counts::default();
+        for name in spec.sessions {
+            copy_tree(
+                &source.tool_path(spec, name),
+                &target.tool_path(spec, name),
+                &mut counts,
+            )?;
+        }
+        if counts.copied + counts.kept > 0 {
+            result.tools.push((Tool::Generic(spec), counts));
+        }
+    }
     Ok(result)
 }
 

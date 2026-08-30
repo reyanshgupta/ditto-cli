@@ -764,6 +764,7 @@ mod tests {
             name: "work".to_owned(),
             claude_home: root.join("claude"),
             codex_home: root.join("codex"),
+            fx_home: root.join("fx-home"),
             omp_home: root.join("omp"),
             opencode: OpencodeHome {
                 data: root.join("opencode/data"),
@@ -772,6 +773,7 @@ mod tests {
             },
             pi_home: root.join("pi"),
             prime_agent_home: root.join("prime-agent"),
+            generic: Vec::new(),
             managed: true,
         }
     }
@@ -1138,6 +1140,7 @@ mod tests {
         let profile = profile(temporary.path());
 
         assert_eq!(title(Tool::Codex, &profile), "ditto:work — Codex");
+        assert_eq!(title(Tool::Fx, &profile), "ditto:work — fx");
         assert_eq!(title(Tool::Opencode, &profile), "ditto:work — opencode");
         assert_eq!(
             title(Tool::PrimeAgent, &profile),
@@ -1146,6 +1149,7 @@ mod tests {
         assert_eq!(title(Tool::Pi, &profile), "ditto:work — Pi");
         assert!(sets_own_title(Tool::Claude));
         assert!(!sets_own_title(Tool::Codex));
+        assert!(!sets_own_title(Tool::Fx));
         assert!(!sets_own_title(Tool::PrimeAgent));
         assert!(!sets_own_title(Tool::Pi));
     }

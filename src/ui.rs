@@ -26,6 +26,7 @@ use crate::{
 const DITTO_PURPLE: Color = Color::Rgb(190, 134, 255);
 const CLAUDE_ORANGE: Color = Color::Rgb(222, 133, 93);
 const CODEX_GREEN: Color = Color::Rgb(104, 201, 154);
+const FX_MAGENTA: Color = Color::Rgb(236, 72, 153);
 const OPENCODE_CYAN: Color = Color::Rgb(103, 199, 209);
 const OMP_BLUE: Color = Color::Rgb(96, 165, 250);
 const PRIME_PURPLE: Color = Color::Rgb(168, 85, 247);
@@ -37,7 +38,7 @@ const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const TICK: Duration = Duration::from_millis(110);
 /// Below this the panes cannot show a usable amount of the profile.
 const MINIMUM_WIDTH: u16 = 68;
-const MINIMUM_HEIGHT: u16 = 24;
+const MINIMUM_HEIGHT: u16 = 26;
 /// The width at which every profile shortcut fits on one footer row.
 const WIDE_FOOTER_WIDTH: u16 = 88;
 /// Marks the profile that commands use when they omit a profile name.
@@ -55,17 +56,33 @@ const SIGN_OUT: Shortcut = ("L", "sign out", Color::Gray);
 const REFRESH: Shortcut = ("r", "refresh", Color::Gray);
 const QUIT: Shortcut = ("q", "quit", Color::Gray);
 
-const TOOL_SHORTCUTS: [Shortcut; 6] = [
-    ("c", "Claude Code", CLAUDE_ORANGE),
-    ("x", "Codex", CODEX_GREEN),
-    ("o", "opencode", OPENCODE_CYAN),
-    ("p", "OMP", OMP_BLUE),
-    ("a", "Prime", PRIME_PURPLE),
-    ("i", "Pi", DITTO_PURPLE),
+const LAUNCH_CLAUDE: Shortcut = ("c", "Claude Code", CLAUDE_ORANGE);
+const LAUNCH_CODEX: Shortcut = ("x", "Codex", CODEX_GREEN);
+const LAUNCH_FX: Shortcut = ("f", "fx", FX_MAGENTA);
+const LAUNCH_OPENCODE: Shortcut = ("o", "opencode", OPENCODE_CYAN);
+const LAUNCH_OMP: Shortcut = ("p", "OMP", OMP_BLUE);
+const LAUNCH_PRIME: Shortcut = ("a", "Prime", PRIME_PURPLE);
+const LAUNCH_PI: Shortcut = ("i", "Pi", DITTO_PURPLE);
+const LAUNCH_MORE: Shortcut = ("⏎", "any tool", DITTO_PURPLE);
+const TOOL_SHORTCUTS: [Shortcut; 8] = [
+    LAUNCH_CLAUDE,
+    LAUNCH_CODEX,
+    LAUNCH_FX,
+    LAUNCH_OPENCODE,
+    LAUNCH_OMP,
+    LAUNCH_PRIME,
+    LAUNCH_PI,
+    LAUNCH_MORE,
 ];
-const AUTH_SHORTCUTS: [Shortcut; 4] = [
+/// The same eight over two rows, for a terminal too narrow to show one.
+const NARROW_TOOL_ROWS: [&[Shortcut]; 2] = [
+    &[LAUNCH_CLAUDE, LAUNCH_CODEX, LAUNCH_FX, LAUNCH_OPENCODE],
+    &[LAUNCH_OMP, LAUNCH_PRIME, LAUNCH_PI, LAUNCH_MORE],
+];
+const AUTH_SHORTCUTS: [Shortcut; 5] = [
     ("c", "Claude Code", CLAUDE_ORANGE),
     ("x", "Codex", CODEX_GREEN),
+    ("f", "fx", FX_MAGENTA),
     ("o", "opencode", OPENCODE_CYAN),
     ("a", "Prime Agent", PRIME_PURPLE),
 ];
@@ -107,6 +124,12 @@ enum Mode {
     ChoosingTool {
         operation: AuthOperation,
     },
+    /// Picking any installed tool to launch: too many for a letter each, so
+    /// the list is typed into instead.
+    Launching {
+        filter: String,
+        selected: usize,
+    },
     ConfirmingLogout {
         tool: Tool,
     },
@@ -114,38 +137,30 @@ enum Mode {
 
 /// Sign-in state for one profile. `None` means the probe is still running, so
 /// the interface can say "checking" instead of guessing.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ProfileAuth {
     generation: u64,
-    claude: Option<AuthStatus>,
-    codex: Option<AuthStatus>,
-    opencode: Option<AuthStatus>,
-    omp: Option<AuthStatus>,
-    prime_agent: Option<AuthStatus>,
-    pi: Option<AuthStatus>,
+    /// Indexed by [`Tool::index`]: a field per tool stopped being possible
+    /// when tools became a table.
+    statuses: [Option<AuthStatus>; Tool::ALL.len()],
+}
+
+impl Default for ProfileAuth {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            statuses: [None; Tool::ALL.len()],
+        }
+    }
 }
 
 impl ProfileAuth {
     fn get(&self, tool: Tool) -> Option<AuthStatus> {
-        match tool {
-            Tool::Claude => self.claude,
-            Tool::Codex => self.codex,
-            Tool::Opencode => self.opencode,
-            Tool::Omp => self.omp,
-            Tool::PrimeAgent => self.prime_agent,
-            Tool::Pi => self.pi,
-        }
+        self.statuses[tool.index()]
     }
 
     fn set(&mut self, tool: Tool, status: AuthStatus) {
-        match tool {
-            Tool::Claude => self.claude = Some(status),
-            Tool::Codex => self.codex = Some(status),
-            Tool::Opencode => self.opencode = Some(status),
-            Tool::Omp => self.omp = Some(status),
-            Tool::PrimeAgent => self.prime_agent = Some(status),
-            Tool::Pi => self.pi = Some(status),
-        }
+        self.statuses[tool.index()] = Some(status);
     }
 
     fn pending(&self) -> bool {
@@ -174,6 +189,9 @@ struct App<'a> {
     spinner: usize,
     has_auth_environment: bool,
     default_profile: Option<String>,
+    /// Every tool that is on `PATH`, found once: `PATH` does not change while
+    /// the picker is open, and thirty-six lookups per redraw would show.
+    installed: Vec<Tool>,
 }
 
 impl<'a> App<'a> {
@@ -199,6 +217,10 @@ impl<'a> App<'a> {
             spinner: 0,
             has_auth_environment: auth_environment_is_set(),
             default_profile,
+            installed: Tool::ALL
+                .into_iter()
+                .filter(|tool| tool.installed())
+                .collect(),
         };
         app.probe_selected();
         app
@@ -353,10 +375,18 @@ impl<'a> App<'a> {
                 }
                 KeyCode::Char('c') => Action::Launch(Tool::Claude),
                 KeyCode::Char('x') => Action::Launch(Tool::Codex),
+                KeyCode::Char('f') => Action::Launch(Tool::Fx),
                 KeyCode::Char('o') => Action::Launch(Tool::Opencode),
                 KeyCode::Char('p') => Action::Launch(Tool::Omp),
                 KeyCode::Char('a') => Action::Launch(Tool::PrimeAgent),
                 KeyCode::Char('i') => Action::Launch(Tool::Pi),
+                KeyCode::Enter | KeyCode::Char('t') => {
+                    self.mode = Mode::Launching {
+                        filter: String::new(),
+                        selected: 0,
+                    };
+                    Action::Continue
+                }
                 _ => Action::Continue,
             }),
             Mode::Creating { input, error } => match key.code {
@@ -444,6 +474,33 @@ impl<'a> App<'a> {
                 }
                 _ => Ok(Action::Continue),
             },
+            Mode::Launching { filter, selected } => {
+                let candidates = launchable(&self.installed, filter);
+                match key.code {
+                    KeyCode::Esc => self.mode = Mode::Browsing,
+                    KeyCode::Enter => {
+                        if let Some(tool) = candidates.get(*selected) {
+                            return Ok(Action::Launch(*tool));
+                        }
+                    }
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(candidates.len().saturating_sub(1));
+                    }
+                    KeyCode::Backspace => {
+                        filter.pop();
+                        *selected = 0;
+                    }
+                    // Letters narrow the list rather than launching, so the
+                    // profile shortcuts cannot fire from inside it.
+                    KeyCode::Char(character) if filter.len() < 32 => {
+                        filter.push(character);
+                        *selected = 0;
+                    }
+                    _ => {}
+                }
+                Ok(Action::Continue)
+            }
             Mode::ChoosingTool { operation } => {
                 let operation = *operation;
                 let tool = match key.code {
@@ -453,6 +510,7 @@ impl<'a> App<'a> {
                     }
                     KeyCode::Char('c') => Tool::Claude,
                     KeyCode::Char('x') => Tool::Codex,
+                    KeyCode::Char('f') => Tool::Fx,
                     KeyCode::Char('o') => Tool::Opencode,
                     KeyCode::Char('a') => Tool::PrimeAgent,
                     _ => return Ok(Action::Continue),
@@ -525,7 +583,8 @@ impl<'a> App<'a> {
 
         // The profile shortcuts need a second row before they would be cut off.
         let narrow = area.width < WIDE_FOOTER_WIDTH;
-        let footer_height = 4 + u16::from(narrow) + u16::from(self.has_auth_environment);
+        // Narrow mode splits both the tools and the actions over two rows.
+        let footer_height = 4 + 2 * u16::from(narrow) + u16::from(self.has_auth_environment);
         let sections = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
@@ -561,7 +620,7 @@ impl<'a> App<'a> {
         let header = Paragraph::new(Line::from(vec![
             Span::styled("Ditto CLI", Style::new().fg(DITTO_PURPLE).bold()),
             Span::styled(
-                "  choose a profile, then a tool",
+                "  choose a profile, then Enter to pick a tool",
                 Style::new().fg(Color::Gray),
             ),
         ]))
@@ -634,19 +693,31 @@ impl<'a> App<'a> {
             ));
             lines.push(Line::default());
         }
+        // The table's tools appear only when installed: the pane has room for
+        // the handful a person has, not for every agent Ditto knows.
+        let shown = Tool::ALL
+            .into_iter()
+            .filter(|tool| !matches!(tool, Tool::Generic(_)) || self.installed.contains(tool))
+            .collect::<Vec<_>>();
         lines.push(Line::styled("Sign-in status", Style::new().bold()));
-        lines.extend(Tool::ALL.map(|tool| status_row(tool, auth.get(tool), self.spinner)));
+        lines.extend(
+            shown
+                .iter()
+                .map(|&tool| status_row(tool, auth.get(tool), self.spinner)),
+        );
 
         lines.push(Line::default());
         lines.push(Line::styled("Profile directories", Style::new().bold()));
-        lines.extend(Tool::ALL.map(|tool| {
+        lines.extend(shown.iter().map(|&tool| {
             let path = match tool {
                 Tool::Claude => profile.claude_home.clone(),
                 Tool::Codex => profile.codex_home.clone(),
+                Tool::Fx => profile.fx_dir(),
                 Tool::Opencode => profile.opencode.data_dir(),
                 Tool::Omp => profile.omp_home.clone(),
                 Tool::PrimeAgent => profile.prime_agent_home.clone(),
                 Tool::Pi => profile.pi_home.clone(),
+                Tool::Generic(spec) => profile.tool_root(spec),
             };
             let path = shorten_home(&path, home);
             Line::from(vec![
@@ -673,10 +744,12 @@ impl<'a> App<'a> {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect, narrow: bool) {
-        let mut lines = vec![shortcut_line(&TOOL_SHORTCUTS)];
+        let mut lines = Vec::new();
         if narrow {
+            lines.extend(NARROW_TOOL_ROWS.iter().map(|row| shortcut_line(row)));
             lines.extend(NARROW_SHORTCUT_ROWS.iter().map(|row| shortcut_line(row)));
         } else {
+            lines.push(shortcut_line(&TOOL_SHORTCUTS));
             lines.push(shortcut_line(&WIDE_SHORTCUT_ROW));
         }
         if self.has_auth_environment {
@@ -761,7 +834,7 @@ impl<'a> App<'a> {
                     // OMP and Pi are missing above on purpose: Ditto CLI can
                     // read their sign-in state but cannot open their commands.
                     Line::styled(
-                        "OMP and Pi sign in and out from their own prompts.",
+                        "OMP, Pi, and the other agents sign in and out from inside themselves.",
                         Style::new().fg(Color::DarkGray),
                     ),
                     Line::default(),
@@ -771,6 +844,56 @@ impl<'a> App<'a> {
                     frame,
                     centered_rect(90, 10, area),
                     &format!(" {} ", operation.label()),
+                    lines,
+                );
+            }
+            Mode::Launching { filter, selected } => {
+                let auth = self.selected_auth();
+                let candidates = launchable(&self.installed, filter);
+                // Room for the prompt, the hint, the borders, and a blank line
+                // either side of the list; the list scrolls inside what is left.
+                let rows = usize::from(area.height.saturating_sub(8)).max(1);
+                let first = selected
+                    .saturating_sub(rows - 1)
+                    .min(candidates.len().saturating_sub(rows));
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled("› ", Style::new().fg(DITTO_PURPLE)),
+                        Span::raw(filter.clone()),
+                        Span::styled("▏", Style::new().fg(Color::DarkGray)),
+                    ]),
+                    Line::default(),
+                ];
+                if candidates.is_empty() {
+                    lines.push(Line::styled(
+                        if self.installed.is_empty() {
+                            "No agent Ditto knows is installed."
+                        } else {
+                            "Nothing matches."
+                        },
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                lines.extend(candidates.iter().enumerate().skip(first).take(rows).map(
+                    |(index, tool)| {
+                        let row = status_row(*tool, auth.get(*tool), self.spinner);
+                        if index == *selected {
+                            row.style(Style::new().reversed())
+                        } else {
+                            row
+                        }
+                    },
+                ));
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    "type to filter · ↑↓ · Enter launches · Esc",
+                    Style::new().fg(Color::DarkGray),
+                ));
+                let height = (lines.len() as u16 + 2).min(area.height);
+                render_popup(
+                    frame,
+                    centered_rect(80, height, area),
+                    &format!(" Launch in '{}' ", self.selected_profile().name),
                     lines,
                 );
             }
@@ -879,10 +1002,12 @@ fn tool_color(tool: Tool) -> Color {
     match tool {
         Tool::Claude => CLAUDE_ORANGE,
         Tool::Codex => CODEX_GREEN,
+        Tool::Fx => FX_MAGENTA,
         Tool::Opencode => OPENCODE_CYAN,
         Tool::Omp => OMP_BLUE,
         Tool::PrimeAgent => PRIME_PURPLE,
         Tool::Pi => DITTO_PURPLE,
+        Tool::Generic(_) => Color::Gray,
     }
 }
 
@@ -967,13 +1092,29 @@ fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'sta
     );
 }
 
+/// The installed tools whose name contains what was typed, in the order they
+/// are listed everywhere else. Case does not matter, and the key counts as
+/// well as the label, so `cli` finds Gemini CLI and `kiro` finds `kiro-cli`.
+fn launchable(installed: &[Tool], filter: &str) -> Vec<Tool> {
+    let filter = filter.trim().to_lowercase();
+    installed
+        .iter()
+        .copied()
+        .filter(|tool| {
+            filter.is_empty()
+                || tool.label().to_lowercase().contains(&filter)
+                || tool.key().contains(&filter)
+        })
+        .collect()
+}
+
 /// Whether renaming a profile costs it its Claude Code sign-in. Claude Code
 /// stores credentials against the directory it was pointed at, and a rename
 /// moves that directory, so a signed-in profile does not stay one. A probe
 /// that has not answered yet is nothing to warn about rather than guessed at.
 fn rename_signs_out(auth: &HashMap<String, ProfileAuth>, name: &str) -> bool {
     auth.get(name)
-        .and_then(|auth| auth.claude)
+        .and_then(|auth| auth.get(Tool::Claude))
         .is_some_and(|status| status == AuthStatus::SignedIn)
 }
 
@@ -1028,8 +1169,34 @@ mod tests {
     /// box is silently clipped rather than wrapped. This pins the width that
     /// decides between one row and two to what the rows actually measure.
     #[test]
+    fn the_launcher_filters_by_label_and_key_without_caring_about_case() {
+        let installed = [
+            Tool::Claude,
+            Tool::by_key("gemini").unwrap(),
+            Tool::by_key("kiro-cli").unwrap(),
+        ];
+        assert_eq!(launchable(&installed, ""), installed.to_vec());
+        assert_eq!(launchable(&installed, "GEM"), vec![installed[1]]);
+        assert_eq!(launchable(&installed, "kiro"), vec![installed[2]]);
+        assert_eq!(
+            launchable(&installed, "cli"),
+            vec![installed[1], installed[2]]
+        );
+        assert!(launchable(&installed, "zzz").is_empty());
+    }
+
+    #[test]
     fn footer_rows_fit_the_widths_that_select_them() {
-        let wide = shortcut_line(&WIDE_SHORTCUT_ROW).width() as u16 + 2;
+        // Wide mode shows the tools and the actions as one row each, so the
+        // width that selects it is whichever of the two rows is longer.
+        let wide = [
+            shortcut_line(&WIDE_SHORTCUT_ROW),
+            shortcut_line(&TOOL_SHORTCUTS),
+        ]
+        .iter()
+        .map(|row| row.width() as u16 + 2)
+        .max()
+        .unwrap();
         assert!(wide <= WIDE_FOOTER_WIDTH, "{wide} exceeds the wide footer");
         assert!(
             wide > WIDE_FOOTER_WIDTH - 1,
@@ -1038,12 +1205,10 @@ mod tests {
             WIDE_FOOTER_WIDTH - wide
         );
 
-        for row in NARROW_SHORTCUT_ROWS {
+        for row in NARROW_SHORTCUT_ROWS.iter().chain(NARROW_TOOL_ROWS.iter()) {
             let width = shortcut_line(row).width() as u16 + 2;
             assert!(width <= MINIMUM_WIDTH, "{width} exceeds the narrow footer");
         }
-        let tools = shortcut_line(&TOOL_SHORTCUTS).width() as u16 + 2;
-        assert!(tools <= MINIMUM_WIDTH, "{tools} exceeds the narrow footer");
 
         let auth = shortcut_line(&AUTH_SHORTCUTS).width() as u16 + 2;
         let auth_popup = MINIMUM_WIDTH * 90 / 100;
@@ -1092,6 +1257,9 @@ mod tests {
         auth.set(Tool::Codex, AuthStatus::SignedOut);
         assert!(auth.pending());
 
+        auth.set(Tool::Fx, AuthStatus::SignedIn);
+        assert!(auth.pending());
+
         auth.set(Tool::Opencode, AuthStatus::SignedIn);
         // OMP reports like the rest, so it holds the spinner open until it
         // answers.
@@ -1104,6 +1272,14 @@ mod tests {
         assert!(auth.pending());
 
         auth.set(Tool::Pi, AuthStatus::SignedOut);
+        // The table's tools answer too, instantly, but they are answers all
+        // the same.
+        assert!(auth.pending());
+        for tool in Tool::ALL {
+            if matches!(tool, Tool::Generic(_)) {
+                auth.set(tool, AuthStatus::Unavailable);
+            }
+        }
         assert!(!auth.pending());
         assert_eq!(auth.get(Tool::Opencode), Some(AuthStatus::SignedIn));
         assert_eq!(auth.get(Tool::Omp), Some(AuthStatus::SignedOut));

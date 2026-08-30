@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::tools::{self, Home};
+
 pub const DEFAULT_PROFILE: &str = "default";
 const MAX_PROFILE_NAME_LEN: usize = 32;
 
@@ -20,7 +22,7 @@ pub(crate) const LAUNCHED_TOOL_VARIABLE: &str = "DITTO_LAUNCHED_TOOL";
 
 /// The variables Ditto redirects whose ambient values define part of the
 /// `default` profile, paired with private copies carried into launched tools.
-pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 5] = [
+pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 6] = [
     ("XDG_DATA_HOME", "DITTO_NATIVE_XDG_DATA_HOME"),
     ("XDG_CONFIG_HOME", "DITTO_NATIVE_XDG_CONFIG_HOME"),
     ("XDG_STATE_HOME", "DITTO_NATIVE_XDG_STATE_HOME"),
@@ -29,18 +31,112 @@ pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 5] = [
         "DITTO_NATIVE_PRIME_AGENT_CODING_AGENT_DIR",
     ),
     ("PI_CODING_AGENT_DIR", "DITTO_NATIVE_PI_CODING_AGENT_DIR"),
+    // Hosts such as Orca choose a Codex account by pointing `CODEX_HOME` at a
+    // directory of their own. The `default` profile means whoever this
+    // environment is already signed in as, so it follows the variable rather
+    // than insisting on `~/.codex` and quietly undoing that choice.
+    ("CODEX_HOME", "DITTO_NATIVE_CODEX_HOME"),
 ];
+
+/// fx has no configuration-root override and reads `$HOME/.fx`. Ditto carries
+/// the user's real home beside the private home it gives fx so nested Ditto
+/// commands still find the original profile store.
+pub(crate) const NATIVE_HOME_ENVIRONMENT: (&str, &str) = ("HOME", "DITTO_NATIVE_HOME");
+
+/// The private copy of a redirected variable. The table above spells its
+/// entries out; the tools described in `tools.rs` follow the same rule.
+pub(crate) fn preserved(variable: &str) -> String {
+    format!("DITTO_NATIVE_{variable}")
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
     pub name: String,
     pub claude_home: PathBuf,
     pub codex_home: PathBuf,
+    pub fx_home: PathBuf,
     pub omp_home: PathBuf,
     pub opencode: OpencodeHome,
     pub pi_home: PathBuf,
     pub prime_agent_home: PathBuf,
+    /// One path per entry of [`tools::ALL`]: the directory a variable-located
+    /// tool is pointed at, the `HOME` a private-home tool is handed, or the
+    /// container of a managed profile's XDG bases. The `default` profile's XDG
+    /// tools read the bases in `opencode`, so their entry there goes unread.
+    pub generic: Vec<PathBuf>,
     pub managed: bool,
+}
+
+impl Profile {
+    /// fx appends `.fx` to `HOME`; managed profiles therefore carry a small home
+    /// facade rather than a directly configurable agent directory.
+    pub fn fx_dir(&self) -> PathBuf {
+        self.fx_home.join(".fx")
+    }
+
+    /// Every directory the profile is made of, for a caller that must not put
+    /// something inside one of them.
+    pub fn directories(&self) -> Vec<&Path> {
+        let mut directories = vec![
+            self.claude_home.as_path(),
+            self.codex_home.as_path(),
+            self.fx_home.as_path(),
+            self.omp_home.as_path(),
+            self.opencode.data.as_path(),
+            self.opencode.config.as_path(),
+            self.opencode.state.as_path(),
+            self.pi_home.as_path(),
+            self.prime_agent_home.as_path(),
+        ];
+        directories.extend(self.generic.iter().map(PathBuf::as_path));
+        directories
+    }
+
+    /// The directory a table-described tool keeps its files in, which is what
+    /// `paths` reports and where its credentials are looked for.
+    pub fn tool_root(&self, spec: &'static tools::Spec) -> PathBuf {
+        match spec.home {
+            Home::Variable { .. } => self.generic[spec.index()].clone(),
+            Home::Parent { native, .. } | Home::Private { native, .. } => {
+                self.generic[spec.index()].join(native)
+            }
+            Home::Xdg { subdir } => self.xdg_base(spec, "config").join(subdir),
+        }
+    }
+
+    /// The one path Ditto sets to point a tool at this profile: the value its
+    /// variable is given, or the `HOME` a private-home tool is handed.
+    pub fn tool_home(&self, spec: &'static tools::Spec) -> &Path {
+        &self.generic[spec.index()]
+    }
+
+    /// One XDG base for a tool that reads them, pinned inside a managed profile
+    /// and the user's own everywhere else, exactly as for opencode.
+    pub fn xdg_base(&self, spec: &'static tools::Spec, base: &str) -> PathBuf {
+        if self.managed {
+            return self.generic[spec.index()].join(base);
+        }
+        match base {
+            "data" => self.opencode.data.clone(),
+            "state" => self.opencode.state.clone(),
+            _ => self.opencode.config.clone(),
+        }
+    }
+
+    /// A path from a spec, resolved inside this profile. An XDG tool's paths
+    /// name their base first, since its files are spread over three of them.
+    pub fn tool_path(&self, spec: &'static tools::Spec, relative: &str) -> PathBuf {
+        if let Home::Xdg { subdir } = spec.home {
+            let (base, rest) = relative.split_once('/').unwrap_or((relative, ""));
+            let directory = self.xdg_base(spec, base).join(subdir);
+            return if rest.is_empty() {
+                directory
+            } else {
+                directory.join(rest)
+            };
+        }
+        self.tool_root(spec).join(relative)
+    }
 }
 
 /// opencode has no single home variable. It resolves its directories from the
@@ -113,11 +209,45 @@ fn configured_home(value: Option<OsString>, user_home: &Path, fallback: PathBuf)
 /// also recognizes children of older Ditto releases, which had only
 /// `DITTO_PROFILE` and would otherwise make an upgrade unable to repair the
 /// profile it was running inside.
+/// The roots the `default` profile exposes: the user's own directories,
+/// wherever the environment already sends them.
+#[derive(Clone, Debug)]
+struct NativeHomes {
+    opencode: OpencodeHome,
+    pi: PathBuf,
+    prime_agent: PathBuf,
+    codex: PathBuf,
+    /// See [`Profile::generic`].
+    generic: Vec<PathBuf>,
+}
+
+impl NativeHomes {
+    /// The roots with nothing in the environment moving them.
+    #[cfg(test)]
+    fn plain(user_home: &Path) -> Self {
+        Self {
+            opencode: OpencodeHome::native(user_home),
+            pi: user_home.join(".pi").join("agent"),
+            prime_agent: user_home.join(".prime").join("agent"),
+            codex: user_home.join(".codex"),
+            generic: tools::ALL
+                .iter()
+                .map(|spec| match spec.home {
+                    Home::Variable { native, .. } => user_home.join(native),
+                    Home::Parent { .. } | Home::Private { .. } | Home::Xdg { .. } => {
+                        user_home.to_path_buf()
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 fn native_homes(
     user_home: &Path,
     root: &Path,
     variable: impl Fn(&str) -> Option<OsString>,
-) -> (OpencodeHome, PathBuf, PathBuf) {
+) -> NativeHomes {
     let launched = variable(LAUNCHED_TOOL_VARIABLE).is_some();
     let selected = variable("DITTO_PROFILE")
         .filter(|profile| profile != DEFAULT_PROFILE)
@@ -180,17 +310,50 @@ fn native_homes(
         user_home,
         user_home.join(".pi").join("agent"),
     );
+    let native_codex = configured_home(
+        original(
+            NATIVE_ENVIRONMENT[5].0,
+            NATIVE_ENVIRONMENT[5].1,
+            Path::new("codex"),
+        ),
+        user_home,
+        user_home.join(".codex"),
+    );
+    let generic = tools::ALL
+        .iter()
+        .map(|spec| match spec.home {
+            Home::Variable { variable, native } => configured_home(
+                original(variable, &preserved(variable), Path::new(spec.key)),
+                user_home,
+                user_home.join(native),
+            ),
+            Home::Parent { variable, .. } => configured_home(
+                original(
+                    variable,
+                    &preserved(variable),
+                    Path::new(&format!("{}-home", spec.key)),
+                ),
+                user_home,
+                user_home.to_path_buf(),
+            ),
+            Home::Private { .. } | Home::Xdg { .. } => user_home.to_path_buf(),
+        })
+        .collect();
 
-    (native_opencode, native_pi, native_prime_agent)
+    NativeHomes {
+        opencode: native_opencode,
+        pi: native_pi,
+        prime_agent: native_prime_agent,
+        codex: native_codex,
+        generic,
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
     user_home: PathBuf,
-    native_opencode: OpencodeHome,
-    native_pi: PathBuf,
-    native_prime_agent: PathBuf,
+    native: NativeHomes,
 }
 
 /// The saved profile a command that named none falls back to, and which saved
@@ -248,33 +411,33 @@ struct State {
 impl Store {
     pub fn discover() -> Result<Self> {
         let base_dirs = BaseDirs::new().context("could not determine your home directory")?;
-        let user_home = base_dirs.home_dir().to_path_buf();
+        let discovered_home = base_dirs.home_dir().to_path_buf();
+        let user_home = if env::var_os(LAUNCHED_TOOL_VARIABLE).is_some() {
+            env::var_os(NATIVE_HOME_ENVIRONMENT.1)
+                .map(PathBuf::from)
+                .unwrap_or(discovered_home)
+        } else {
+            discovered_home
+        };
         let root = env::var_os("DITTO_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| user_home.join(".ditto"));
 
-        let (native_opencode, native_pi, native_prime_agent) =
-            native_homes(&user_home, &root, |name| env::var_os(name));
+        let native = native_homes(&user_home, &root, |name| env::var_os(name));
         Ok(Self {
             root,
             user_home,
-            native_opencode,
-            native_pi,
-            native_prime_agent,
+            native,
         })
     }
 
     #[cfg(test)]
     pub fn new(root: PathBuf, user_home: PathBuf) -> Self {
-        let native_opencode = OpencodeHome::native(&user_home);
-        let native_pi = user_home.join(".pi").join("agent");
-        let native_prime_agent = user_home.join(".prime").join("agent");
+        let native = NativeHomes::plain(&user_home);
         Self {
             root,
             user_home,
-            native_opencode,
-            native_pi,
-            native_prime_agent,
+            native,
         }
     }
 
@@ -497,9 +660,12 @@ impl Store {
         // CLI gets a chance to put credentials in it.
         let opencode_root = self.opencode_root(&profile.name);
         let omp_root = self.omp_profile_root(&profile.name);
+        let fx_dir = profile.fx_dir();
         let directories = [
             profile.claude_home.as_path(),
             profile.codex_home.as_path(),
+            profile.fx_home.as_path(),
+            fx_dir.as_path(),
             opencode_root.as_path(),
             profile.opencode.data.as_path(),
             profile.opencode.config.as_path(),
@@ -509,10 +675,27 @@ impl Store {
             profile.pi_home.as_path(),
             profile.prime_agent_home.as_path(),
         ];
-        for directory in directories {
-            fs::create_dir_all(directory)
+        let generic = tools::ALL.iter().flat_map(|spec| match spec.home {
+            Home::Variable { .. } => vec![profile.tool_root(spec)],
+            Home::Parent { .. } | Home::Private { .. } => {
+                vec![
+                    profile.tool_home(spec).to_path_buf(),
+                    profile.tool_root(spec),
+                ]
+            }
+            Home::Xdg { .. } => ["config", "data", "state"]
+                .into_iter()
+                .map(|base| profile.xdg_base(spec, base))
+                .collect(),
+        });
+        for directory in directories
+            .into_iter()
+            .map(Path::to_path_buf)
+            .chain(generic)
+        {
+            fs::create_dir_all(&directory)
                 .with_context(|| format!("could not create {}", directory.display()))?;
-            secure_directory(directory)?;
+            secure_directory(&directory)?;
         }
         Ok(())
     }
@@ -603,11 +786,13 @@ impl Store {
         Profile {
             name: DEFAULT_PROFILE.to_owned(),
             claude_home: self.user_home.join(".claude"),
-            codex_home: self.user_home.join(".codex"),
+            codex_home: self.native.codex.clone(),
+            fx_home: self.user_home.clone(),
             omp_home: self.user_home.join(".omp").join("agent"),
-            opencode: self.native_opencode.clone(),
-            pi_home: self.native_pi.clone(),
-            prime_agent_home: self.native_prime_agent.clone(),
+            opencode: self.native.opencode.clone(),
+            pi_home: self.native.pi.clone(),
+            prime_agent_home: self.native.prime_agent.clone(),
+            generic: self.native.generic.clone(),
             managed: false,
         }
     }
@@ -618,10 +803,24 @@ impl Store {
             name: name.to_owned(),
             claude_home: root.join("claude"),
             codex_home: root.join("codex"),
+            // fx has no independent state-root variable, so it receives a small
+            // private HOME and keeps its own files below `.fx` there.
+            fx_home: root.join("fx-home"),
             omp_home: self.omp_profile_root(name).join("agent"),
             opencode: OpencodeHome::isolated(&self.opencode_root(name)),
             pi_home: root.join("pi"),
             prime_agent_home: root.join("prime-agent"),
+            generic: tools::ALL
+                .iter()
+                .map(|spec| match spec.home {
+                    // A home sits beside the tool's directory rather than
+                    // being it, the way `fx-home` holds `.fx`.
+                    Home::Parent { .. } | Home::Private { .. } => {
+                        root.join(format!("{}-home", spec.key))
+                    }
+                    Home::Variable { .. } | Home::Xdg { .. } => root.join(spec.key),
+                })
+                .collect(),
             managed: true,
         }
     }
@@ -837,14 +1036,31 @@ mod tests {
                 profile.join("prime-agent").into_os_string(),
             ),
             ("PI_CODING_AGENT_DIR", profile.join("pi").into_os_string()),
+            ("CODEX_HOME", profile.join("codex").into_os_string()),
         ]);
 
-        let (opencode, pi, prime_agent) =
-            native_homes(&home, &root, |name| values.get(name).cloned());
+        let native = native_homes(&home, &root, |name| values.get(name).cloned());
 
-        assert_eq!(opencode, OpencodeHome::native(&home));
-        assert_eq!(pi, home.join(".pi/agent"));
-        assert_eq!(prime_agent, home.join(".prime/agent"));
+        assert_eq!(native.opencode, OpencodeHome::native(&home));
+        assert_eq!(native.pi, home.join(".pi/agent"));
+        assert_eq!(native.prime_agent, home.join(".prime/agent"));
+        assert_eq!(native.codex, home.join(".codex"));
+    }
+
+    /// A host that picks a Codex account does it by setting `CODEX_HOME`, and
+    /// the `default` profile has to follow it or a launch through Ditto
+    /// silently runs as somebody else.
+    #[test]
+    fn follows_a_codex_home_the_environment_already_chose() {
+        let home = std::env::temp_dir().join("ditto-native-home");
+        let root = home.join(".ditto");
+        let chosen = std::env::temp_dir().join("orca/codex-accounts/abc");
+        let values =
+            std::collections::HashMap::from([("CODEX_HOME", chosen.clone().into_os_string())]);
+
+        let native = native_homes(&home, &root, |name| values.get(name).cloned());
+
+        assert_eq!(native.codex, chosen);
     }
 
     #[test]
@@ -871,16 +1087,17 @@ mod tests {
                 OsString::from("~/prime"),
             ),
             ("DITTO_NATIVE_PI_CODING_AGENT_DIR", OsString::from("~/pi")),
+            ("DITTO_NATIVE_CODEX_HOME", OsString::from("~/codex")),
         ]);
 
-        let (opencode, pi, prime_agent) =
-            native_homes(&home, &root, |name| values.get(name).cloned());
+        let native = native_homes(&home, &root, |name| values.get(name).cloned());
 
-        assert_eq!(opencode.data, custom.join("data"));
-        assert_eq!(opencode.config, custom.join("config"));
-        assert_eq!(opencode.state, custom.join("state"));
-        assert_eq!(pi, home.join("pi"));
-        assert_eq!(prime_agent, home.join("prime"));
+        assert_eq!(native.opencode.data, custom.join("data"));
+        assert_eq!(native.opencode.config, custom.join("config"));
+        assert_eq!(native.opencode.state, custom.join("state"));
+        assert_eq!(native.pi, home.join("pi"));
+        assert_eq!(native.prime_agent, home.join("prime"));
+        assert_eq!(native.codex, home.join("codex"));
     }
 
     #[test]
@@ -894,6 +1111,8 @@ mod tests {
         let profile = store.create_profile("work")?;
         assert!(profile.claude_home.is_dir());
         assert!(profile.codex_home.is_dir());
+        assert!(profile.fx_home.is_dir());
+        assert!(profile.fx_dir().is_dir());
         assert!(profile.opencode.data.is_dir());
         assert!(profile.opencode.config.is_dir());
         assert!(profile.opencode.state.is_dir());

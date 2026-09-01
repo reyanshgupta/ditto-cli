@@ -574,24 +574,6 @@ fn preserve_native_environment(command: &mut Command) {
 #[cfg(unix)]
 const NO_PROXY_VARIABLE: &str = "DITTO_NO_PROXY";
 
-/// Set by Orca in every terminal it opens, and read for the reason
-/// `HERDR_PANE_ID` is. Orca works out which agent a pane is running from the
-/// pane's foreground process and from the title the agent writes, with its
-/// Claude Code rules anchored to the first character, and it holds a prompt
-/// back until the foreground process is the agent it launched. A proxy fails
-/// all three at once. Unlike herdr, Orca has no command that labels an
-/// existing pane, so there is nowhere to report the profile instead; Claude
-/// Code's status line still names it.
-#[cfg(unix)]
-const ORCA_PANE_VARIABLE: &str = "ORCA_PANE_KEY";
-
-/// A variable set to nothing is not an Orca terminal. Orca never sets it
-/// empty, but a shell that exported it around a launch will.
-#[cfg(unix)]
-fn inside_orca() -> bool {
-    std::env::var_os(ORCA_PANE_VARIABLE).is_some_and(|pane| !pane.is_empty())
-}
-
 /// Puts the profile in front of the user before the tool takes the terminal.
 /// Claude Code gets a status line inside its own interface; the rest get the
 /// window title.
@@ -608,18 +590,16 @@ fn show_profile(tool: Tool, profile: &Profile) {
 /// Rewriting the title only means anything on a real terminal, so redirected
 /// output is handed over untouched.
 ///
-/// herdr and Orca are the other ways out. Both read the foreground process and
-/// the title to work out which agent is in a pane and what it is doing, and a
-/// proxy costs them both answers, so under either the title is not Ditto's to
-/// take. `herdr::report_profile` says the same thing where herdr will show it;
-/// Orca has nowhere to say it.
+/// herdr is the other way out. It reads the foreground process and the title to
+/// work out which agent is in a pane and what it is doing, and a proxy costs it
+/// both answers, so under herdr the title is not Ditto's to take.
+/// `herdr::report_profile` says the same thing where herdr will show it.
 #[cfg(unix)]
 fn proxy_wanted() -> bool {
     use std::io::IsTerminal;
 
     std::env::var_os(NO_PROXY_VARIABLE).is_none()
         && crate::herdr::pane().is_none()
-        && !inside_orca()
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal()
 }

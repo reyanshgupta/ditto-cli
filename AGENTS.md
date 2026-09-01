@@ -119,7 +119,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `main.rs` | Subcommand dispatch, and the human/JSON reporting for each. The picker's terminal guard. |
 | `cli.rs` | The clap types. Parsing only — no behaviour, no filesystem. |
 | `profile.rs` | `Store` and `Profile`: where a profile's directories are, creating, renaming, deleting, and `state.toml`. Also `write_private_file`, the atomic owner-only write everything else uses. |
-| `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY`, herdr, and Orca (`ORCA_PANE_KEY`). |
+| `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY` and herdr (`HERDR_PANE_ID`). |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |

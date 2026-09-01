@@ -253,9 +253,9 @@ pub const ALL: &[Spec] = &[
         bin_variable: "DITTO_DEVIN_BIN",
         // Only the data base is documented by name; the configuration is said
         // to follow the XDG convention without the variable being named, and
-        // Orca's `DEVIN_HOME` is not in Devin's own documentation. The data
-        // base also holds the downloaded CLI versions, so a managed profile
-        // downloads its own copy once.
+        // the `DEVIN_HOME` third-party launchers set is not in Devin's own
+        // documentation. The data base also holds the downloaded CLI versions,
+        // so a managed profile downloads its own copy once.
         home: Home::Xdg { subdir: "devin" },
         managed_env: &[],
         credentials: &["data/credentials.toml"],

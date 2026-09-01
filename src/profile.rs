@@ -31,8 +31,8 @@ pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 6] = [
         "DITTO_NATIVE_PRIME_AGENT_CODING_AGENT_DIR",
     ),
     ("PI_CODING_AGENT_DIR", "DITTO_NATIVE_PI_CODING_AGENT_DIR"),
-    // Hosts such as Orca choose a Codex account by pointing `CODEX_HOME` at a
-    // directory of their own. The `default` profile means whoever this
+    // An account switcher chooses a Codex account by pointing `CODEX_HOME` at a
+    // directory of its own. The `default` profile means whoever this
     // environment is already signed in as, so it follows the variable rather
     // than insisting on `~/.codex` and quietly undoing that choice.
     ("CODEX_HOME", "DITTO_NATIVE_CODEX_HOME"),
@@ -1054,7 +1054,7 @@ mod tests {
     fn follows_a_codex_home_the_environment_already_chose() {
         let home = std::env::temp_dir().join("ditto-native-home");
         let root = home.join(".ditto");
-        let chosen = std::env::temp_dir().join("orca/codex-accounts/abc");
+        let chosen = std::env::temp_dir().join("ditto-codex-accounts/abc");
         let values =
             std::collections::HashMap::from([("CODEX_HOME", chosen.clone().into_os_string())]);
 

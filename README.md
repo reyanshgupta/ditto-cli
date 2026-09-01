@@ -577,22 +577,6 @@ herdr pane report-metadata <pane> --source ditto --token profile=<profile>
 
 herdr shows it as a pane token, and detection, agent state, and the Claude Code status line all keep working. Nothing needs configuring — it keys off `HERDR_PANE_ID`, which herdr sets in every pane it opens. If herdr is not running or its CLI is not on `PATH` the report is skipped and the launch carries on.
 
-### Under Orca
-
-[Orca](https://github.com/stablyai/orca) runs agents side by side in worktrees of their own, and reads the same two things herdr does — the pane's foreground process and the title the agent writes — to know which agent a terminal is running and whether it is working or waiting. It also holds a prompt back until the foreground process is the agent it launched. A pseudoterminal in between costs it all three, so Ditto CLI steps aside inside an Orca terminal as well. It keys off `ORCA_PANE_KEY`, which Orca sets in every terminal it opens. Orca has no command that labels a pane already open, so there is nothing to report the profile to: Claude Code's status line still names it, and the other tools run without it in the title.
-
-Orca starts an agent by typing its command into your shell, which leaves two ways to put a profile in front of it:
-
-- With [shell integration](#shell-integration) loaded, nothing else is needed. The `claude` Orca types is already the function that routes through Ditto CLI.
-- Otherwise open Orca's **Settings → Agents** and set the agent's **Command** to `ditto-cli claude --`, or `ditto-cli claude client-a --` to pin one profile. Orca appends its own arguments and the prompt after it, and everything after `--` reaches the tool. The same works for every [supported agent](#supported-agents).
-
-Which profile a worktree launches with follows the usual [resolution](#how-a-directory-is-resolved). A `.ditto.toml` committed at the repository root is checked out into every worktree Orca creates; `ditto-cli workspace` binds a directory that cannot carry one.
-
-Two things to know:
-
-- Orca's own account switchers and Ditto profiles compose. Orca picks a Claude account by swapping the credentials in `~/.claude` and a Codex account by pointing `CODEX_HOME` at a directory of its own; both are what the `default` profile resolves to, so Orca decides who `default` is, and Ditto profiles are everyone else.
-- Orca's agent status hooks are written to `~/.claude/settings.json`. A profile created before they were turned on has none; `ditto-cli sync <profile>` copies them in, unless the profile already had `hooks` of its own, which `sync` reports under `kept`.
-
 ## Scripting and agents
 
 Add `--json` to any reporting command and it prints one JSON object on stdout. The flag is global, so it reads correctly on either side of the subcommand:
@@ -769,7 +753,6 @@ The `default` profile points to `~/.claude`, `~/.codex` (or `CODEX_HOME` when se
 | `DITTO_PROFILE` | Selected profile name exported to every launched tool, and what Claude Code's status line reports |
 | `DITTO_NO_PROXY` | Hand the terminal straight to the tool, leaving the title to it (macOS and Linux) |
 | `HERDR_PANE_ID` | Read, not set: herdr names the pane it opened, and Ditto CLI steps aside and reports the profile to herdr. See [Under herdr](#under-herdr) |
-| `ORCA_PANE_KEY` | Read, not set: Orca names the terminal it opened, and Ditto CLI steps aside. See [Under Orca](#under-orca) |
 | `NO_COLOR` | Draw the Claude Code status line without colour |
 
 Example:

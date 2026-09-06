@@ -40,7 +40,7 @@ const TICK: Duration = Duration::from_millis(110);
 const MINIMUM_WIDTH: u16 = 68;
 const MINIMUM_HEIGHT: u16 = 26;
 /// The width at which every profile shortcut fits on one footer row.
-const WIDE_FOOTER_WIDTH: u16 = 88;
+const WIDE_FOOTER_WIDTH: u16 = if cfg!(target_os = "macos") { 101 } else { 88 };
 /// Marks the profile that commands use when they omit a profile name.
 const DEFAULT_MARK: &str = "★";
 
@@ -58,13 +58,15 @@ const QUIT: Shortcut = ("q", "quit", Color::Gray);
 
 const LAUNCH_CLAUDE: Shortcut = ("c", "Claude Code", CLAUDE_ORANGE);
 const LAUNCH_CODEX: Shortcut = ("x", "Codex", CODEX_GREEN);
+#[cfg(target_os = "macos")]
+const LAUNCH_CODEX_DESKTOP: Shortcut = ("X", "Codex Desktop", CODEX_GREEN);
 const LAUNCH_FX: Shortcut = ("f", "fx", FX_MAGENTA);
 const LAUNCH_OPENCODE: Shortcut = ("o", "opencode", OPENCODE_CYAN);
 const LAUNCH_OMP: Shortcut = ("p", "OMP", OMP_BLUE);
 const LAUNCH_PRIME: Shortcut = ("a", "Prime", PRIME_PURPLE);
 const LAUNCH_PI: Shortcut = ("i", "Pi", DITTO_PURPLE);
 const LAUNCH_MORE: Shortcut = ("⏎", "any tool", DITTO_PURPLE);
-const TOOL_SHORTCUTS: [Shortcut; 8] = [
+const TOOL_SHORTCUTS: &[Shortcut] = &[
     LAUNCH_CLAUDE,
     LAUNCH_CODEX,
     LAUNCH_FX,
@@ -72,12 +74,21 @@ const TOOL_SHORTCUTS: [Shortcut; 8] = [
     LAUNCH_OMP,
     LAUNCH_PRIME,
     LAUNCH_PI,
+    #[cfg(target_os = "macos")]
+    LAUNCH_CODEX_DESKTOP,
     LAUNCH_MORE,
 ];
-/// The same eight over two rows, for a terminal too narrow to show one.
+/// Split over two rows for a terminal too narrow to show every launch shortcut.
 const NARROW_TOOL_ROWS: [&[Shortcut]; 2] = [
     &[LAUNCH_CLAUDE, LAUNCH_CODEX, LAUNCH_FX, LAUNCH_OPENCODE],
-    &[LAUNCH_OMP, LAUNCH_PRIME, LAUNCH_PI, LAUNCH_MORE],
+    &[
+        LAUNCH_OMP,
+        LAUNCH_PRIME,
+        LAUNCH_PI,
+        #[cfg(target_os = "macos")]
+        LAUNCH_CODEX_DESKTOP,
+        LAUNCH_MORE,
+    ],
 ];
 const AUTH_SHORTCUTS: [Shortcut; 5] = [
     ("c", "Claude Code", CLAUDE_ORANGE),
@@ -97,6 +108,10 @@ const NARROW_SHORTCUT_ROWS: [&[Shortcut]; 2] = [
 pub enum UiAction {
     Launch {
         tool: Tool,
+        profile: Profile,
+    },
+    #[cfg(target_os = "macos")]
+    LaunchCodexDesktop {
         profile: Profile,
     },
     Authenticate {
@@ -375,6 +390,8 @@ impl<'a> App<'a> {
                 }
                 KeyCode::Char('c') => Action::Launch(Tool::Claude),
                 KeyCode::Char('x') => Action::Launch(Tool::Codex),
+                #[cfg(target_os = "macos")]
+                KeyCode::Char('X') => Action::LaunchCodexDesktop,
                 KeyCode::Char('f') => Action::Launch(Tool::Fx),
                 KeyCode::Char('o') => Action::Launch(Tool::Opencode),
                 KeyCode::Char('p') => Action::Launch(Tool::Omp),
@@ -749,7 +766,7 @@ impl<'a> App<'a> {
             lines.extend(NARROW_TOOL_ROWS.iter().map(|row| shortcut_line(row)));
             lines.extend(NARROW_SHORTCUT_ROWS.iter().map(|row| shortcut_line(row)));
         } else {
-            lines.push(shortcut_line(&TOOL_SHORTCUTS));
+            lines.push(shortcut_line(TOOL_SHORTCUTS));
             lines.push(shortcut_line(&WIDE_SHORTCUT_ROW));
         }
         if self.has_auth_environment {
@@ -925,6 +942,8 @@ enum Action {
     Continue,
     Quit,
     Launch(Tool),
+    #[cfg(target_os = "macos")]
+    LaunchCodexDesktop,
     Authenticate {
         operation: AuthOperation,
         tool: Tool,
@@ -962,6 +981,12 @@ fn run_loop(terminal: &mut DefaultTerminal, mut app: App<'_>) -> Result<Option<U
                         Action::Launch(tool) => {
                             return Ok(Some(UiAction::Launch {
                                 tool,
+                                profile: app.selected_profile().clone(),
+                            }));
+                        }
+                        #[cfg(target_os = "macos")]
+                        Action::LaunchCodexDesktop => {
+                            return Ok(Some(UiAction::LaunchCodexDesktop {
                                 profile: app.selected_profile().clone(),
                             }));
                         }
@@ -1191,7 +1216,7 @@ mod tests {
         // width that selects it is whichever of the two rows is longer.
         let wide = [
             shortcut_line(&WIDE_SHORTCUT_ROW),
-            shortcut_line(&TOOL_SHORTCUTS),
+            shortcut_line(TOOL_SHORTCUTS),
         ]
         .iter()
         .map(|row| row.width() as u16 + 2)

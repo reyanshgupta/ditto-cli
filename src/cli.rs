@@ -60,6 +60,9 @@ pub enum Command {
     /// Launch Codex.
     #[command(visible_alias = "cx")]
     Codex(LaunchArgs),
+    /// Launch Codex Desktop with an isolated profile.
+    #[command(visible_alias = "cxa")]
+    CodexApp(CodexAppArgs),
     /// Launch fx.
     Fx(LaunchArgs),
     /// Launch opencode.
@@ -291,6 +294,15 @@ pub struct LaunchArgs {
     pub args: Vec<OsString>,
 }
 
+#[derive(Debug, Args)]
+pub struct CodexAppArgs {
+    /// Profile name. Uses the last selected profile when omitted.
+    pub profile: Option<String>,
+    /// Directory to open. Uses the current directory when omitted.
+    #[arg(short = 'C', long, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
+}
+
 /// The launch a tool named outside the subcommand list was asked for.
 ///
 /// clap hands over the bare words, so this reads them the way [`LaunchArgs`]
@@ -492,6 +504,15 @@ mod tests {
         assert!(matches!(
             codex.command,
             Some(Command::Codex(LaunchArgs { profile, .. })) if profile.as_deref() == Some("work")
+        ));
+
+        let codex_app =
+            Cli::try_parse_from(["ditto-cli", "cxa", "work", "-C", "/tmp/project"]).unwrap();
+        assert!(matches!(
+            codex_app.command,
+            Some(Command::CodexApp(CodexAppArgs { profile, directory }))
+                if profile.as_deref() == Some("work")
+                    && directory == Some(PathBuf::from("/tmp/project"))
         ));
 
         let opencode =

@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::{
     ffi::OsString,
     fs, io,
@@ -6,10 +8,14 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
+#[cfg(target_os = "macos")]
+use crate::profile::secure_directory;
 use crate::{
     indicator,
     profile::{
@@ -22,6 +28,9 @@ use crate::{
 /// OMP's per-profile store. It holds credentials alongside sessions and
 /// settings, so it lives inside the profile's agent directory.
 const OMP_DATABASE: &str = "agent.db";
+
+#[cfg(target_os = "macos")]
+const ELECTRON_USER_DATA: &str = "electron-user-data";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Tool {
@@ -535,6 +544,159 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
     command
 }
 
+/// Opens the signed desktop application with the selected Codex home. Managed
+/// profiles also receive separate Electron state because the desktop login and
+/// its single-instance lock live outside `CODEX_HOME`.
+pub fn launch_codex_desktop(profile: &Profile, user_home: &Path, directory: &Path) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (profile, user_home, directory);
+        bail!("Codex Desktop launching is only available on macOS");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if profile.managed {
+            let metadata = fs::symlink_metadata(&profile.codex_home)
+                .with_context(|| format!("could not inspect {}", profile.codex_home.display()))?;
+            if !metadata.file_type().is_dir() {
+                bail!(
+                    "Codex profile home is not a real directory: {}",
+                    profile.codex_home.display()
+                );
+            }
+        }
+        if profile.managed && std::env::var_os("CODEX_ACCESS_TOKEN").is_some() {
+            bail!(
+                "CODEX_ACCESS_TOKEN is set; unset it so the selected desktop profile controls authentication"
+            );
+        }
+
+        let app = codex_desktop_app(user_home)?;
+        let user_data = profile
+            .managed
+            .then(|| profile.codex_home.join(ELECTRON_USER_DATA));
+        if let Some(path) = &user_data {
+            ensure_private_directory(path)?;
+        }
+
+        let status = codex_desktop_command(&app, profile, directory, user_data.as_deref())
+            .status()
+            .with_context(|| format!("could not launch {}", app.display()))?;
+        if !status.success() {
+            bail!(
+                "could not launch {}: `open` exited with {status}",
+                app.display()
+            );
+        }
+
+        eprintln!(
+            "ditto-cli: requested Codex Desktop launch for profile '{}'",
+            profile.name
+        );
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn codex_desktop_app(user_home: &Path) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("DITTO_CHATGPT_APP").map(PathBuf::from) {
+        if path.is_dir() {
+            return Ok(path);
+        }
+        bail!(
+            "DITTO_CHATGPT_APP does not name an application bundle: {}",
+            path.display()
+        );
+    }
+
+    [
+        PathBuf::from("/Applications/ChatGPT.app"),
+        user_home.join("Applications/ChatGPT.app"),
+        PathBuf::from("/Applications/Codex.app"),
+        user_home.join("Applications/Codex.app"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir())
+    .ok_or_else(|| {
+        anyhow!(
+            "ChatGPT Desktop is not installed; install it in Applications or set DITTO_CHATGPT_APP"
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn codex_desktop_command(
+    app: &Path,
+    profile: &Profile,
+    directory: &Path,
+    user_data: Option<&Path>,
+) -> Command {
+    let mut command = Command::new("open");
+    // The stock app may already be running. Opening it without overrides keeps
+    // its session intact instead of claiming to change an existing process.
+    if let Some(user_data) = user_data {
+        command.arg("-n");
+        let mut environment = base_command(Tool::Codex, profile);
+        // Launch Services does not inherit the invoking shell's environment.
+        // Carry Ditto's original roots so a CLI opened inside this window can
+        // still resolve `default` rather than mistaking this profile for it.
+        environment.envs(std::env::vars_os().filter(|(name, _)| {
+            name == "DITTO_HOME" || name.to_string_lossy().starts_with("DITTO_NATIVE_")
+        }));
+        environment.env("CODEX_ELECTRON_USER_DATA_PATH", user_data);
+        for (name, value) in environment.get_envs() {
+            if let Some(value) = value {
+                command
+                    .arg("--env")
+                    .arg(environment_assignment(name, value));
+            }
+        }
+    }
+    command.arg("-a").arg(app).arg(directory);
+    if let Some(user_data) = user_data {
+        let mut argument = OsString::from("--user-data-dir=");
+        argument.push(user_data);
+        command.arg("--args").arg(argument);
+    }
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn environment_assignment(name: &std::ffi::OsStr, value: &std::ffi::OsStr) -> OsString {
+    let mut assignment = OsString::from(name);
+    assignment.push("=");
+    assignment.push(value);
+    assignment
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_private_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing symlinked desktop state directory {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!("desktop state path is not a directory: {}", path.display())
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(path)
+                .with_context(|| format!("could not create {}", path.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", path.display()));
+        }
+    }
+    secure_directory(path)
+}
+
 /// Carries the roots from before Ditto redirected any tool into every child.
 /// A tool can invoke Ditto again through a shell command, and without these
 /// copies that nested process would mistake the active account's isolated
@@ -792,6 +954,27 @@ mod tests {
             Some(std::ffi::OsStr::new("/profiles/work/codex"))
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_state_cannot_redirect_to_another_profile() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let other_profile = temporary.path().join("other");
+        fs::create_dir(&other_profile).unwrap();
+        fs::set_permissions(&other_profile, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = temporary.path().join("electron-user-data");
+        symlink(&other_profile, &state).unwrap();
+
+        assert!(ensure_private_directory(&state).is_err());
+        assert_eq!(
+            fs::metadata(&other_profile).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(state.is_symlink());
+    }
+
     #[test]
     fn fx_uses_a_private_home_and_profile_file_credentials() {
         let profile = profile();

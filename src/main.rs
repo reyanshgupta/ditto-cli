@@ -25,7 +25,7 @@ use clap::{CommandFactory, FromArgMatches};
 use serde_json::{Value, json};
 
 use cli::{
-    AutoState, Cli, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
+    AutoState, Cli, CodexAppArgs, Command, DefaultAction, DefaultArgs, DeleteArgs, IndicatorAction,
     IndicatorArgs, LaunchArgs, ShellInitArgs, SyncArgs, WorkspaceArgs, WorkspaceCommand,
 };
 use indicator::Existing;
@@ -119,6 +119,7 @@ fn run(cli: Cli) -> Result<()> {
         Some(Command::Codex(arguments)) => {
             launch_direct(&store, &workspaces, Tool::Codex, arguments)
         }
+        Some(Command::CodexApp(arguments)) => launch_codex_app(&store, &workspaces, arguments),
         Some(Command::Fx(arguments)) => launch_direct(&store, &workspaces, Tool::Fx, arguments),
         Some(Command::Opencode(arguments)) => {
             launch_direct(&store, &workspaces, Tool::Opencode, arguments)
@@ -195,6 +196,17 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
                 store.save_last_profile(&profile.name)?;
                 auto_bind(store, workspaces, &profile.name)?;
                 return launch::launch(tool, &profile, &[]);
+            }
+            #[cfg(target_os = "macos")]
+            ui::UiAction::LaunchCodexDesktop { profile } => {
+                return launch_codex_app(
+                    store,
+                    workspaces,
+                    CodexAppArgs {
+                        profile: Some(profile.name),
+                        directory: None,
+                    },
+                );
             }
             ui::UiAction::Authenticate {
                 operation,
@@ -814,6 +826,26 @@ fn profile_paths(profile: &Profile) -> Value {
         paths[spec.key.replace('-', "_")] = json!(profile.tool_root(spec).display().to_string());
     }
     paths
+}
+
+fn launch_codex_app(store: &Store, workspaces: &Workspaces, arguments: CodexAppArgs) -> Result<()> {
+    let directory = directory_argument(arguments.directory)?;
+    std::env::set_current_dir(&directory)
+        .with_context(|| format!("could not enter {}", directory.display()))?;
+    let directory = current_directory()?;
+    let (profile, fell_back) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
+    if let Some(fallback) = fell_back {
+        eprintln!(
+            "ditto-cli: using '{}'; nothing binds {}, and it is {}",
+            profile.name,
+            directory.display(),
+            fallback.describe()
+        );
+    }
+    launch::launch_codex_desktop(&profile, store.user_home(), &directory)?;
+    store.save_last_profile(&profile.name)?;
+    auto_bind(store, workspaces, &profile.name)?;
+    Ok(())
 }
 
 fn launch_direct(

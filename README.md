@@ -13,6 +13,7 @@ Each profile gets its own credentials and conversation history. Everything you s
 ditto-cli create work        # a profile with logins of its own
 ditto-cli claude work        # launch Claude Code inside it
 ditto-cli workspace use work # or bind the project once and stop typing the name
+ditto-cli codex-app work     # open its Codex Desktop window (macOS)
 ```
 
 Pick a profile, then a tool:
@@ -50,7 +51,7 @@ Pick a profile, then a tool:
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                  c Claude Code · x Codex · f fx · o opencode                 │
-│                      p OMP · a Prime · i Pi · ⏎ any tool                     │
+│             p OMP · a Prime · i Pi · X Codex Desktop · ⏎ any tool            │
 │                   ↑↓ select · n new · e rename · d default                   │
 │                  l sign in · L sign out · r refresh · q quit                 │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -229,7 +230,7 @@ ditto-cli
 
 1. **Make a profile.** Press `n` and name it, such as `work`.
 2. **Sign in.** With the profile selected, press `l` and choose Claude Code, Codex, fx, opencode, or Prime Agent; Prime Agent opens straight onto its `/login` dialog. Every other agent signs in from inside itself — launch it in step 3 and run `/login`, or its own login command, there.
-3. **Launch a tool.** Press `Enter` for a list of every installed agent, filtered as you type, or a key directly: `c` Claude Code, `x` Codex, `f` fx, `o` opencode, `p` OMP, `a` Prime Agent, `i` Pi.
+3. **Launch a tool.** Press `Enter` for a list of every installed agent, filtered as you type, or a key directly: `c` Claude Code, `x` Codex CLI, `X` Codex Desktop on macOS, `f` fx, `o` opencode, `p` OMP, `a` Prime Agent, `i` Pi.
 
 Each tool keeps its own credentials. Signing in to one does not copy credentials into another.
 
@@ -247,7 +248,8 @@ ditto-cli claude work
 | --- | --- |
 | `↑` / `↓` or `k` / `j` | Select a profile |
 | `c` | Launch Claude Code |
-| `x` | Launch Codex |
+| `x` | Launch Codex CLI |
+| `X` (`Shift+x`) | Open Codex Desktop with the selected profile (macOS) |
 | `f` | Launch fx |
 | `o` | Launch opencode |
 | `p` | Launch OMP |
@@ -299,7 +301,7 @@ Sign-in status is checked in the background, so the list stays responsive while 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                  c Claude Code · x Codex · f fx · o opencode                 │
-│                      p OMP · a Prime · i Pi · ⏎ any tool                     │
+│             p OMP · a Prime · i Pi · X Codex Desktop · ⏎ any tool            │
 │                   ↑↓ select · n new · e rename · d default                   │
 │                  l sign in · L sign out · r refresh · q quit                 │
 └──────────────────────────────────────────────────────────────────────────────┘
@@ -329,10 +331,11 @@ ditto-cli sync --all --history   # also backfill existing conversations
 
 **Launch a tool**
 
-| Command | Alias | Pass arguments through with `--` |
+| Command | Alias | Example |
 | --- | --- | --- |
 | `ditto-cli claude client-a` | `cc` | `ditto-cli cc client-a -- --model opus` |
 | `ditto-cli codex client-a` | `cx` | `ditto-cli cx client-a -- --search` |
+| `ditto-cli codex-app client-a` | `cxa` | `ditto-cli cxa client-a -C ~/work/client-a` |
 | `ditto-cli fx client-a` | — | `ditto-cli fx client-a -- login` |
 | `ditto-cli opencode client-a` | `oc` | `ditto-cli oc client-a -- --model anthropic/claude-opus-5` |
 | `ditto-cli omp client-a` | — | `ditto-cli omp client-a -- --model opus` |
@@ -340,7 +343,20 @@ ditto-cli sync --all --history   # also backfill existing conversations
 | `ditto-cli pi client-a` | — | `ditto-cli pi client-a -- --model anthropic/claude-opus-4-6` |
 | `ditto-cli gemini client-a` | — | `ditto-cli gemini client-a -- --model gemini-2.5-pro`, and so on for every [supported agent](#supported-agents), by its command name |
 
-Everything after `--` goes to the tool untouched, so any flag it accepts works. `ditto-cli --help` lists every agent; the [table](#supported-agents) says how each is isolated.
+For CLI launches, everything after `--` goes to the tool untouched, so any flag it accepts works. `codex-app` instead accepts `-C PATH` to open a directory and resolve its profile binding. `ditto-cli --help` lists every agent; the [table](#supported-agents) says how each is isolated.
+
+On macOS, `codex-app` opens the installed ChatGPT/Codex desktop application.
+A managed profile gets its own `CODEX_HOME` and private Electron state under
+that Codex directory, so work and personal windows can remain signed in side
+by side. `default` simply opens the ordinary desktop session without changing
+its environment; an already-running stock app keeps its existing account.
+The Electron boundary covers the whole ChatGPT window, not only Codex, and
+the first launch of a profile may ask you to sign in. Ditto never reads or
+copies the token. `status` reports CLI authentication, not the visible desktop
+account. This is local-state separation, not an OS security boundary.
+Close a profile's desktop windows before renaming or deleting that profile.
+Managed desktop launches refuse an inherited `CODEX_ACCESS_TOKEN`; unset it
+so a shell credential cannot override the selected profile.
 
 **Bind a directory, so launches from it need no profile name**
 
@@ -715,6 +731,7 @@ Ditto CLI's own files are laid out like this:
     ├── work/
     │   ├── claude/
     │   ├── codex/
+    │   │   └── electron-user-data/ # private ChatGPT window state after `codex-app`
     │   ├── opencode/
     │   │   ├── config/opencode/
     │   │   ├── data/opencode/      # auth.json lives here
@@ -744,6 +761,7 @@ The `default` profile points to `~/.claude`, `~/.codex` (or `CODEX_HOME` when se
 | `DITTO_HOME` | Move Ditto CLI's state and profile directory from `~/.ditto` |
 | `DITTO_CLAUDE_BIN` | Override the `claude` executable |
 | `DITTO_CODEX_BIN` | Override the `codex` executable |
+| `DITTO_CHATGPT_APP` | Override the ChatGPT/Codex desktop application bundle used by `codex-app` |
 | `DITTO_FX_BIN` | Override the `fx` executable |
 | `DITTO_OPENCODE_BIN` | Override the `opencode` executable |
 | `DITTO_OMP_BIN` | Override the `omp` executable |

@@ -8,6 +8,10 @@ This file is for agents and scripts. The first half is how to *drive* Ditto; the
 
 **Never run bare `ditto-cli`.** With no subcommand it opens the interactive picker, which needs a real terminal. Without one it exits 1 and tells you which commands to use instead. Every setting the picker can change has a subcommand, so nothing is out of reach.
 
+On macOS, `Shift+x` in the profile picker opens Codex Desktop with the selected
+profile, equivalent to `ditto-cli codex-app <profile>`. Lowercase `x` still
+launches Codex CLI. Desktop launch errors are returned after restoring the terminal.
+
 Add `--json` to any reporting command and it prints one JSON object on stdout. It is global, so either side of the subcommand works:
 
 ```bash
@@ -15,7 +19,7 @@ ditto-cli list --json
 ditto-cli --json list
 ```
 
-Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The launch commands (`claude`, `codex`, `fx`, `opencode`, `omp`, `prime-agent`, `pi`, and every key in `src/tools.rs`, as `ditto-cli gemini`) hand the terminal to another program and exit with *its* status, so they have nothing to report; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
+Errors are prose on stderr with exit 1, or `{"error": "..."}` on stderr with exit 1 when `--json` is set. Success is always exit 0. `--json` covers `list`, `status`, `paths`, `create`, `rename`, `delete`, `sync`, `default`, `workspace`, and `indicator`. The CLI launch commands (`claude`, `codex`, `fx`, `opencode`, `omp`, `prime-agent`, `pi`, and every key in `src/tools.rs`, as `ditto-cli gemini`) hand the terminal to another program and exit with *its* status, so they have nothing to report. `codex-app` starts the selected macOS desktop profile and returns after Launch Services accepts it; `update` and the hidden `statusline` print prose only, and `shell-init` prints a shell script for a shell to read.
 
 ### The config an agent can edit
 
@@ -87,6 +91,7 @@ ditto-cli delete work --yes --json
 ditto-cli claude work -- --model opus
 ditto-cli prime-agent work -- --model claude-opus-4-1
 ditto-cli pi work -- --model anthropic/claude-opus-4-6
+ditto-cli codex-app work -C ~/work/project
 ```
 
 `DITTO_HOME` relocates the whole store, which is what makes a hermetic run possible:
@@ -119,7 +124,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `main.rs` | Subcommand dispatch, and the human/JSON reporting for each. The picker's terminal guard. |
 | `cli.rs` | The clap types. Parsing only — no behaviour, no filesystem. |
 | `profile.rs` | `Store` and `Profile`: where a profile's directories are, creating, renaming, deleting, and `state.toml`. Also `write_private_file`, the atomic owner-only write everything else uses. |
-| `launch.rs` | `Tool`, running a tool with the profile's environment, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY` and herdr (`HERDR_PANE_ID`). |
+| `launch.rs` | `Tool`, running a tool with the profile's environment, launching isolated Codex Desktop windows on macOS, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY` and herdr (`HERDR_PANE_ID`). |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |

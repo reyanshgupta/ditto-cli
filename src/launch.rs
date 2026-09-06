@@ -547,7 +547,11 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
 /// Opens the signed desktop application with the selected Codex home. Managed
 /// profiles also receive separate Electron state because the desktop login and
 /// its single-instance lock live outside `CODEX_HOME`.
-pub fn launch_codex_desktop(profile: &Profile, user_home: &Path, directory: &Path) -> Result<()> {
+pub fn launch_codex_desktop(
+    profile: &Profile,
+    user_home: &Path,
+    directory: Option<&Path>,
+) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (profile, user_home, directory);
@@ -629,7 +633,7 @@ pub(crate) fn codex_desktop_app(user_home: &Path) -> Result<PathBuf> {
 fn codex_desktop_command(
     app: &Path,
     profile: &Profile,
-    directory: &Path,
+    directory: Option<&Path>,
     user_data: Option<&Path>,
 ) -> Command {
     let mut command = Command::new("open");
@@ -653,7 +657,12 @@ fn codex_desktop_command(
             }
         }
     }
-    command.arg("-a").arg(app).arg(directory);
+    command.arg("-a").arg(app);
+    // Switching profiles must not import the terminal's project into each
+    // account. Only an explicit -C requests an open-document event.
+    if let Some(directory) = directory {
+        command.arg(directory);
+    }
     if let Some(user_data) = user_data {
         let mut argument = OsString::from("--user-data-dir=");
         argument.push(user_data);

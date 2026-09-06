@@ -11,6 +11,8 @@ This file is for agents and scripts. The first half is how to *drive* Ditto; the
 On macOS, `Shift+x` in the profile picker opens Codex Desktop with the selected
 profile, equivalent to `ditto-cli codex-app <profile>`. Lowercase `x` still
 launches Codex CLI. Desktop launch errors are returned after restoring the terminal.
+Desktop profile switching does not add or bind the terminal's current directory.
+Only `codex-app -C PATH` requests opening a project and auto-binding that directory.
 
 Add `--json` to any reporting command and it prints one JSON object on stdout. It is global, so either side of the subcommand works:
 

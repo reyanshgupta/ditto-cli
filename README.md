@@ -345,6 +345,14 @@ ditto-cli sync --all --history   # also backfill existing conversations
 
 For CLI launches, everything after `--` goes to the tool untouched, so any flag it accepts works. `codex-app` instead accepts `-C PATH` to open a directory and resolve its profile binding. `ditto-cli --help` lists every agent; the [table](#supported-agents) says how each is isolated.
 
+Without `-C`, `codex-app` reopens the selected profile without adding the
+terminal's current directory to its projects or creating a workspace binding.
+The picker behaves the same way. Use `-C PATH` only when you want that directory
+opened in the selected profile.
+Current ChatGPT builds can ignore a `-C` request when that profile's desktop
+instance is already running. In that case, open the project from the desktop
+window, or quit that profile's instance before using `-C`.
+
 On macOS, `codex-app` opens the installed ChatGPT/Codex desktop application.
 A managed profile gets its own `CODEX_HOME` and private Electron state under
 that Codex directory, so work and personal windows can remain signed in side
@@ -444,7 +452,7 @@ It is a normal file: readable, editable by hand, and safe to commit if everyone 
 
 ### Directories are bound automatically
 
-Launching from a directory that nothing yet answers for binds it to the profile that launch used:
+Launching a CLI from a directory that nothing yet answers for binds it to the profile that launch used. Desktop launches only do this when a directory is explicitly supplied with `codex-app -C PATH`:
 
 ```console
 $ cd ~/code/new-project

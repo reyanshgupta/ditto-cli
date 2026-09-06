@@ -298,7 +298,7 @@ pub struct LaunchArgs {
 pub struct CodexAppArgs {
     /// Profile name. Uses the last selected profile when omitted.
     pub profile: Option<String>,
-    /// Directory to open. Uses the current directory when omitted.
+    /// Open this directory as a project. Omit to reopen the profile without adding a project.
     #[arg(short = 'C', long, value_name = "PATH")]
     pub directory: Option<PathBuf>,
 }

@@ -829,6 +829,7 @@ fn profile_paths(profile: &Profile) -> Value {
 }
 
 fn launch_codex_app(store: &Store, workspaces: &Workspaces, arguments: CodexAppArgs) -> Result<()> {
+    let open_directory = arguments.directory.is_some();
     let directory = directory_argument(arguments.directory)?;
     std::env::set_current_dir(&directory)
         .with_context(|| format!("could not enter {}", directory.display()))?;
@@ -842,9 +843,15 @@ fn launch_codex_app(store: &Store, workspaces: &Workspaces, arguments: CodexAppA
             fallback.describe()
         );
     }
-    launch::launch_codex_desktop(&profile, store.user_home(), &directory)?;
+    launch::launch_codex_desktop(
+        &profile,
+        store.user_home(),
+        open_directory.then_some(directory.as_path()),
+    )?;
     store.save_last_profile(&profile.name)?;
-    auto_bind(store, workspaces, &profile.name)?;
+    if open_directory {
+        auto_bind(store, workspaces, &profile.name)?;
+    }
     Ok(())
 }
 

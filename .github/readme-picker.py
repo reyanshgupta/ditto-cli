@@ -38,7 +38,14 @@ for name, body in AGENTS.items():
     script = bin_dir / name
     script.write_text(f"#!/bin/sh\n{body}\n")
     script.chmod(0o755)
-env = {"HOME": str(home), "PATH": str(bin_dir), "TERM": "xterm-256color"}
+desktop_app = tmp / "ChatGPT.app"
+desktop_app.mkdir()
+env = {
+    "HOME": str(home),
+    "PATH": str(bin_dir),
+    "TERM": "xterm-256color",
+    "DITTO_CHATGPT_APP": str(desktop_app),
+}
 
 def ditto(*args):
     subprocess.run([str(BIN), *args], env=env, check=True, capture_output=True)

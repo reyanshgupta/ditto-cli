@@ -27,9 +27,10 @@ Pick a profile, then a tool:
 │  personal              ││                                                    │
 │› work  ★               ││★ Used when no profile is named                     │
 │                        ││                                                    │
-│                        ││Sign-in status                                      │
+│                        ││Tools and sign-in status                            │
 │                        ││Claude Code  ● Signed in                            │
 │                        ││Codex        ○ Sign in required                     │
+│                        ││Codex Desktop  Open app                             │
 │                        ││fx           ● Signed in                            │
 │                        ││opencode     ○ Sign in required                     │
 │                        ││OMP          ● Signed in                            │
@@ -47,7 +48,6 @@ Pick a profile, then a tool:
 │                        ││Prime Agent  ~/.ditto/profiles/work/prime-agent     │
 │                        ││Pi           ~/.ditto/profiles/work/pi              │
 │                        ││Gemini CLI   …itto/profiles/work/gemini-home/.gemini│
-│                        ││Grok         ~/.ditto/profiles/work/grok            │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                  c Claude Code · x Codex · f fx · o opencode                 │
@@ -230,7 +230,7 @@ ditto-cli
 
 1. **Make a profile.** Press `n` and name it, such as `work`.
 2. **Sign in.** With the profile selected, press `l` and choose Claude Code, Codex, fx, opencode, or Prime Agent; Prime Agent opens straight onto its `/login` dialog. Every other agent signs in from inside itself — launch it in step 3 and run `/login`, or its own login command, there.
-3. **Launch a tool.** Press `Enter` for a list of every installed agent, filtered as you type, or a key directly: `c` Claude Code, `x` Codex CLI, `X` Codex Desktop on macOS, `f` fx, `o` opencode, `p` OMP, `a` Prime Agent, `i` Pi.
+3. **Launch a tool.** Press `Enter` for a searchable list of installed agents, including **Codex Desktop** on macOS, or a key directly: `c` Claude Code, `x` Codex CLI, `X` Codex Desktop, `f` fx, `o` opencode, `p` OMP, `a` Prime Agent, `i` Pi.
 
 Each tool keeps its own credentials. Signing in to one does not copy credentials into another.
 
@@ -255,7 +255,7 @@ ditto-cli claude work
 | `p` | Launch OMP |
 | `a` | Launch Prime Agent |
 | `i` | Launch Pi |
-| `Enter` or `t` | Launch any installed agent: a list of them all, filtered as you type |
+| `Enter` or `t` | Pick an installed agent, including Codex Desktop on macOS; type to filter |
 | `l` | Sign in with Claude Code, Codex, fx, opencode, or Prime Agent |
 | `L` | Sign out, with confirmation |
 | `n` | Create a profile |
@@ -264,7 +264,7 @@ ditto-cli claude work
 | `r` | Refresh sign-in status |
 | `q`, `Esc`, or `Ctrl+C` | Quit or close a dialog |
 
-Sign-in status is checked in the background, so the list stays responsive while each CLI is asked. A spinner marks the tools still being checked.
+Sign-in status is checked in the background, so the list stays responsive while each CLI is asked. A spinner marks the tools still being checked. On macOS, an installed Codex Desktop also appears in the selected-profile pane and the launch menu. Its `Open app` label does not claim a desktop sign-in state from CLI credentials.
 
 `Enter` puts every installed agent in one list, narrowed as you type:
 
@@ -277,27 +277,27 @@ Sign-in status is checked in the background, so the list stays responsive while 
 │  personal              ││                                                    │
 │› work  ★               ││★ Used when no profile is named                     │
 │                        ││                                                    │
-│                        ││Sign-in status                                      │
+│                        ││Tools and sign-in status                            │
 │                        ││Claude Code  ● Signed in                            │
-│                        ││Codex        ○ Sign in required                     │
 │       ┌ Launch in 'work' ────────────────────────────────────────────┐       │
 │       │› ▏                                                           │       │
 │       │                                                              │       │
 │       │Claude Code  ● Signed in                                      │       │
 │       │Codex        ○ Sign in required                               │       │
+│       │Codex Desktop  Open app                                       │       │
 │       │fx           ● Signed in                                      │       │
 │       │opencode     ○ Sign in required                               │       │
 │       │OMP          ● Signed in                                      │       │
 │       │Prime Agent  ● Signed in                                      │       │
 │       │Pi           ○ Sign in required                               │       │
 │       │Gemini CLI   ● Signed in                                      │       │
-│       │Grok         ○ Sign in required                               │fx     │
-│       │                                                              │pencode│
-│       │type to filter · ↑↓ · Enter launches · Esc                    │       │
-│       └──────────────────────────────────────────────────────────────┘nt     │
+│       │Grok         ○ Sign in required                               │       │
+│       │                                                              │fx     │
+│       │type to filter · ↑↓ · Enter launches · Esc                    │pencode│
+│       └──────────────────────────────────────────────────────────────┘       │
+│                        ││Prime Agent  ~/.ditto/profiles/work/prime-agent     │
 │                        ││Pi           ~/.ditto/profiles/work/pi              │
 │                        ││Gemini CLI   …itto/profiles/work/gemini-home/.gemini│
-│                        ││Grok         ~/.ditto/profiles/work/grok            │
 └────────────────────────┘└────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                  c Claude Code · x Codex · f fx · o opencode                 │
@@ -357,6 +357,10 @@ account. This is local-state separation, not an OS security boundary.
 Close a profile's desktop windows before renaming or deleting that profile.
 Managed desktop launches refuse an inherited `CODEX_ACCESS_TOKEN`; unset it
 so a shell credential cannot override the selected profile.
+
+Repository folders are shared on disk: opening the same path from two profiles
+opens the same files. Ditto does not live-sync the desktop's saved project list
+or chats between profiles; those remain separate from shared Codex configuration.
 
 **Bind a directory, so launches from it need no profile name**
 

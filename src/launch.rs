@@ -599,7 +599,7 @@ pub fn launch_codex_desktop(profile: &Profile, user_home: &Path, directory: &Pat
 }
 
 #[cfg(target_os = "macos")]
-fn codex_desktop_app(user_home: &Path) -> Result<PathBuf> {
+pub(crate) fn codex_desktop_app(user_home: &Path) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("DITTO_CHATGPT_APP").map(PathBuf::from) {
         if path.is_dir() {
             return Ok(path);

@@ -192,6 +192,15 @@ struct Probe {
     status: AuthStatus,
 }
 
+/// Desktop and CLI launches use different authentication surfaces. Keeping the
+/// target separate prevents a CLI login probe from labeling Desktop signed in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaunchTarget {
+    Cli(Tool),
+    #[cfg(target_os = "macos")]
+    CodexDesktop,
+}
+
 struct App<'a> {
     store: &'a Store,
     profiles: Vec<Profile>,
@@ -204,9 +213,8 @@ struct App<'a> {
     spinner: usize,
     has_auth_environment: bool,
     default_profile: Option<String>,
-    /// Every tool that is on `PATH`, found once: `PATH` does not change while
-    /// the picker is open, and thirty-six lookups per redraw would show.
-    installed: Vec<Tool>,
+    /// Discover launch targets once rather than probing the filesystem on redraw.
+    installed: Vec<LaunchTarget>,
 }
 
 impl<'a> App<'a> {
@@ -220,6 +228,16 @@ impl<'a> App<'a> {
             .and_then(|name| profiles.iter().position(|profile| profile.name == name))
             .unwrap_or(0);
         let (sender, receiver) = mpsc::channel();
+        let mut installed = Vec::new();
+        for tool in Tool::ALL {
+            if tool.installed() {
+                installed.push(LaunchTarget::Cli(tool));
+            }
+            #[cfg(target_os = "macos")]
+            if tool == Tool::Codex && launch::codex_desktop_app(store.user_home()).is_ok() {
+                installed.push(LaunchTarget::CodexDesktop);
+            }
+        }
         let mut app = Self {
             store,
             profiles,
@@ -232,10 +250,7 @@ impl<'a> App<'a> {
             spinner: 0,
             has_auth_environment: auth_environment_is_set(),
             default_profile,
-            installed: Tool::ALL
-                .into_iter()
-                .filter(|tool| tool.installed())
-                .collect(),
+            installed,
         };
         app.probe_selected();
         app
@@ -496,8 +511,12 @@ impl<'a> App<'a> {
                 match key.code {
                     KeyCode::Esc => self.mode = Mode::Browsing,
                     KeyCode::Enter => {
-                        if let Some(tool) = candidates.get(*selected) {
-                            return Ok(Action::Launch(*tool));
+                        if let Some(target) = candidates.get(*selected) {
+                            return Ok(match target {
+                                LaunchTarget::Cli(tool) => Action::Launch(*tool),
+                                #[cfg(target_os = "macos")]
+                                LaunchTarget::CodexDesktop => Action::LaunchCodexDesktop,
+                            });
                         }
                     }
                     KeyCode::Up => *selected = selected.saturating_sub(1),
@@ -714,14 +733,22 @@ impl<'a> App<'a> {
         // the handful a person has, not for every agent Ditto knows.
         let shown = Tool::ALL
             .into_iter()
-            .filter(|tool| !matches!(tool, Tool::Generic(_)) || self.installed.contains(tool))
+            .filter(|tool| {
+                !matches!(tool, Tool::Generic(_))
+                    || self.installed.contains(&LaunchTarget::Cli(*tool))
+            })
             .collect::<Vec<_>>();
-        lines.push(Line::styled("Sign-in status", Style::new().bold()));
-        lines.extend(
-            shown
-                .iter()
-                .map(|&tool| status_row(tool, auth.get(tool), self.spinner)),
-        );
+        lines.push(Line::styled(
+            "Tools and sign-in status",
+            Style::new().bold(),
+        ));
+        for &tool in &shown {
+            lines.push(status_row(tool, auth.get(tool), self.spinner));
+            #[cfg(target_os = "macos")]
+            if tool == Tool::Codex && self.installed.contains(&LaunchTarget::CodexDesktop) {
+                lines.push(desktop_row());
+            }
+        }
 
         lines.push(Line::default());
         lines.push(Line::styled("Profile directories", Style::new().bold()));
@@ -892,8 +919,14 @@ impl<'a> App<'a> {
                     ));
                 }
                 lines.extend(candidates.iter().enumerate().skip(first).take(rows).map(
-                    |(index, tool)| {
-                        let row = status_row(*tool, auth.get(*tool), self.spinner);
+                    |(index, target)| {
+                        let row = match target {
+                            LaunchTarget::Cli(tool) => {
+                                status_row(*tool, auth.get(*tool), self.spinner)
+                            }
+                            #[cfg(target_os = "macos")]
+                            LaunchTarget::CodexDesktop => desktop_row(),
+                        };
                         if index == *selected {
                             row.style(Style::new().reversed())
                         } else {
@@ -1063,6 +1096,14 @@ fn status_row(tool: Tool, status: Option<AuthStatus>, spinner: usize) -> Line<'s
     tool_row(tool, symbol, label, color)
 }
 
+#[cfg(target_os = "macos")]
+fn desktop_row() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(LAUNCH_CODEX_DESKTOP.1, Style::new().fg(CODEX_GREEN)),
+        Span::styled("  Open app", Style::new().fg(Color::DarkGray)),
+    ])
+}
+
 /// Paths are long enough to wrap the detail pane, so the home directory is
 /// abbreviated the way a shell prompt would. The separator is the platform's
 /// own, so what is shown reads as one path rather than two conventions spliced
@@ -1120,15 +1161,18 @@ fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'sta
 /// The installed tools whose name contains what was typed, in the order they
 /// are listed everywhere else. Case does not matter, and the key counts as
 /// well as the label, so `cli` finds Gemini CLI and `kiro` finds `kiro-cli`.
-fn launchable(installed: &[Tool], filter: &str) -> Vec<Tool> {
+fn launchable(installed: &[LaunchTarget], filter: &str) -> Vec<LaunchTarget> {
     let filter = filter.trim().to_lowercase();
     installed
         .iter()
         .copied()
-        .filter(|tool| {
-            filter.is_empty()
-                || tool.label().to_lowercase().contains(&filter)
-                || tool.key().contains(&filter)
+        .filter(|target| {
+            let (label, key) = match target {
+                LaunchTarget::Cli(tool) => (tool.label(), tool.key()),
+                #[cfg(target_os = "macos")]
+                LaunchTarget::CodexDesktop => (LAUNCH_CODEX_DESKTOP.1, "codex-app"),
+            };
+            filter.is_empty() || label.to_lowercase().contains(&filter) || key.contains(&filter)
         })
         .collect()
 }
@@ -1190,16 +1234,14 @@ mod tests {
         assert_eq!(notice_height(&message, wide), 7);
     }
 
-    /// The footer centres each row inside a border, so a row wider than its
-    /// box is silently clipped rather than wrapped. This pins the width that
-    /// decides between one row and two to what the rows actually measure.
     #[test]
     fn the_launcher_filters_by_label_and_key_without_caring_about_case() {
         let installed = [
             Tool::Claude,
             Tool::by_key("gemini").unwrap(),
             Tool::by_key("kiro-cli").unwrap(),
-        ];
+        ]
+        .map(LaunchTarget::Cli);
         assert_eq!(launchable(&installed, ""), installed.to_vec());
         assert_eq!(launchable(&installed, "GEM"), vec![installed[1]]);
         assert_eq!(launchable(&installed, "kiro"), vec![installed[2]]);
@@ -1208,6 +1250,21 @@ mod tests {
             vec![installed[1], installed[2]]
         );
         assert!(launchable(&installed, "zzz").is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_is_selectable_separately_from_codex_cli() {
+        let installed = [LaunchTarget::Cli(Tool::Codex), LaunchTarget::CodexDesktop];
+        assert_eq!(launchable(&installed, "codex"), installed);
+        assert_eq!(
+            launchable(&installed, "DESKTOP"),
+            vec![LaunchTarget::CodexDesktop]
+        );
+        assert_eq!(
+            launchable(&installed, "codex-app"),
+            vec![LaunchTarget::CodexDesktop]
+        );
     }
 
     #[test]

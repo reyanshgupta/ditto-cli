@@ -665,14 +665,18 @@ A profile exists to be signed in as somebody else, not to be a different working
 | Tool | Read from your own configuration |
 | --- | --- |
 | Claude Code | `skills`, `agents`, `commands`, `hooks`, `plugins`, `output-styles`, `CLAUDE.md` |
-| Codex | `skills`, `rules`, `prompts`, `plugins`, `config.toml`, `hooks.json`, `AGENTS.md`, `instructions.md` |
+| Codex | `skills`, `rules`, `prompts`, `config.toml`, `hooks.json`, `AGENTS.md`, `instructions.md`; plugin code is copied as described below |
 | opencode | the whole configuration directory |
 | OMP | `config.yml`, `extensions` |
 | Prime Agent | `settings.json`, `keybindings.json`, instructions, prompts, skills, extensions, themes, packages, and the global harness |
 | Pi | `settings.json`, `keybindings.json`, project trust, instructions, prompts, skills, extensions, themes, packages, and managed tools |
 | Every other agent | its settings, instructions, skills, commands, and plugins — the entry in [`src/tools.rs`](src/tools.rs) names them |
 
-These are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync and no copies to drift apart. Everything else — `.claude.json`, `auth.json`, sessions, session artifacts, history, `agent.db` — stays inside the profile, which is the whole of what a profile keeps to itself. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
+The shared configuration paths are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync. Everything else, including `.claude.json`, `auth.json`, sessions, session artifacts, history, and `agent.db`, stays inside the profile. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
+
+Codex's `plugins/cache` is the exception: its browser service loader resolves symbolic links and refuses executable code outside the selected `CODEX_HOME`. Ditto copies missing cache files into a real profile-local plugin directory during creation, `sync`, and Codex CLI or Desktop launch. Existing profile files are never overwritten, including with `--adopt` or `--overwrite`; Codex manages its local updates. Newly installed versions from the default profile are picked up at the next sync or launch. Plugin runtime state beside the cache is not copied.
+
+Older Ditto plugin links are migrated automatically: Ditto prepares the local cache first, preserves the old link as `plugins.before-ditto` (with a numbered suffix if needed), and installs the directory. The original shared plugin files remain untouched. Custom plugin links and symbolic links inside the cache are reported for manual installation in the profile rather than followed. Restart an already open Codex Desktop window after migration so its loader resolves the new paths. JSON `create` and `sync` reports include `shared_copied` for caches copied locally; `shared` continues to list symbolic links.
 
 Conversation history is not linked: chats can contain account- or client-specific work, and shared writable session stores would make every profile's future activity visible to every other profile. Existing conversations, from any agent, can instead be copied once, without replacing anything already in the destination. Choose one profile explicitly or all managed profiles explicitly:
 

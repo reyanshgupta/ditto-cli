@@ -104,6 +104,8 @@ DITTO_HOME=$(mktemp -d) ditto-cli create scratch --json
 
 ### Stable output contract
 
+`create` and `sync` also report `shared_copied`, listing executable caches copied into the profile rather than symlinked. Codex's `plugins/cache` is copied on creation, sync, and Codex CLI/Desktop launch. Existing local files are kept, and the old shared `plugins` link is preserved as `plugins.before-ditto` during migration. Runtime state outside the cache stays private. A running desktop window should be restarted after migration.
+
 These strings are an interface. Changing one breaks callers, so treat it as a deliberate break, not a wording fix.
 
 | Field | Values |
@@ -130,6 +132,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
+| `codex_plugins.rs` | Profile-local Codex plugin cache copies and migration of old shared plugin links, required by Codex's trusted executable loader. |
 | `history.rs` | One-time conversation backfills for every tool. File stores copy only missing files; opencode sessions cross through its export/import commands so credentials never do. |
 | `ui.rs` | The Ratatui picker. |
 | `workspace.rs` | The per-directory binding: the committed `.ditto.toml`, the registry for directories Ditto should leave no file in, and the walk towards the filesystem root that finds the nearest of them. |
@@ -166,7 +169,7 @@ cargo clippy --all-targets -- -D warnings
 
 **Never clobber a user's configuration.** Ditto owns exactly one key in `settings.json`. The `Foreign` outcome exists so that a `statusLine` Ditto did not write is reported and left in place, `Alongside` exists so that the way to have both is to keep theirs rather than to overwrite it, and `settings::copy` withholds every key the profile has already answered unless `--overwrite` asks for it. Extend that pattern rather than working around it: when Ditto has to sit where something of the user's already is, run theirs, keep everything it carried, and be able to hand it back.
 
-**Isolate accounts, share everything else.** A profile exists to be signed in as somebody else, not to be a different working environment. Credentials and session state stay in the profile; skills, subagents, commands, hooks, plugins and the memory files are linked back to the user's own configuration by `shared.rs`, so there is one copy edited in one place. That list is an allowlist and must stay one: teaching Ditto a new extension directory late costs a missing feature, and sharing a credential file by accident costs the isolation the tool exists for. Claude Code's `settings.json` is the one thing copied rather than linked, because Ditto writes the status line into it.
+**Isolate accounts, share everything else.** A profile exists to be signed in as somebody else, not to be a different working environment. Credentials and session state stay in the profile; reusable configuration is linked back to the user's own configuration by `shared.rs`. That list is an allowlist and must stay one: teaching Ditto a new extension directory late costs a missing feature, and sharing a credential file by accident costs isolation. Claude Code's `settings.json` is copied because Ditto writes its status line. Codex's executable `plugins/cache` is copied because its trusted loader rejects code resolving outside the profile home. Keep skills and ordinary configuration linked; never broaden the loader's trust boundary to accommodate plugin links.
 
 **The README's screens are captures, not drawings.** `.github/readme-picker.py` runs a debug build in a pseudoterminal with stand-in agents and prints the two blocks the README shows; paste its output over them whenever the picker changes. Hand edits drift, and drifted once.
 

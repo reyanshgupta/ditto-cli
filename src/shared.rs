@@ -16,10 +16,13 @@
 //! annoyance and a shared account is the failure Ditto exists to prevent, so
 //! the list below is an allowlist and the cost of that is keeping it current.
 //!
-//! Claude Code's `settings.json` is the one piece of configuration that is
+//! Claude Code's `settings.json` is a piece of configuration that is
 //! copied instead of linked, because Ditto writes the profile's status line
 //! into it and linking would mean writing that into the user's own file. See
 //! [`crate::settings`].
+//! Codex's executable plugin cache is also copied, because its trusted loader
+//! rejects code reached through a link outside the selected home. See
+//! [`crate::codex_plugins`].
 //!
 //! Linking a directory has one cost, and [`repair`] is what pays it. See the
 //! comment there.
@@ -66,7 +69,6 @@ const CODEX: &[&str] = &[
     "skills",
     "rules",
     "prompts",
-    "plugins",
     "config.toml",
     "hooks.json",
     "AGENTS.md",
@@ -126,6 +128,9 @@ const PI: &[&str] = &[
 /// noticed when a skill turns out to be missing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Linked {
+    /// Executable caches copied inside the profile for tools whose trusted
+    /// loaders do not accept shared directory links.
+    pub copied: Vec<String>,
     /// Paths now reading from the user's own configuration, whether this run
     /// made the link or found it already there.
     pub linked: Vec<String>,
@@ -162,6 +167,16 @@ struct Borrowed {
 /// deleted either way.
 pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
     let mut result = Linked::default();
+    match crate::codex_plugins::sync(source, target) {
+        Ok(true) => {
+            result.copied.push("codex/plugins/cache".to_owned());
+            result.changed = true;
+        }
+        Ok(false) => {}
+        Err(error) => result
+            .failed
+            .push(("codex/plugins/cache".to_owned(), format!("{error:#}"))),
+    }
     // Nothing the profile itself lives in is the user's configuration to
     // mirror: linked into the profile's private home, such a directory would
     // make the profile contain itself. Ditto's store is the obvious case, and
@@ -724,6 +739,32 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target.claude_home.join("skills/humanizer.md")).unwrap(),
             "yours"
+        );
+    }
+
+    #[test]
+    fn syncing_and_adopting_keep_codex_plugin_code_local() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(
+            &source.codex_home.join("plugins/cache/browser"),
+            "service.mjs",
+        );
+        let target = store.create_profile("work").unwrap();
+        let first = link(&source, &target, false).unwrap();
+        assert_eq!(first.copied, ["codex/plugins/cache"]);
+        let second = link(&source, &target, true).unwrap();
+        assert!(second.copied.is_empty());
+        assert!(
+            !fs::symlink_metadata(target.codex_home.join("plugins"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert!(
+            fs::canonicalize(target.codex_home.join("plugins/cache/browser/service.mjs"))
+                .unwrap()
+                .starts_with(fs::canonicalize(&target.codex_home).unwrap())
         );
     }
 

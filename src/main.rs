@@ -1,4 +1,5 @@
 mod cli;
+mod codex_plugins;
 mod herdr;
 mod history;
 mod indicator;
@@ -193,6 +194,7 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
 
         match action {
             ui::UiAction::Launch { tool, profile } => {
+                prepare_codex_plugins(store, tool, &profile)?;
                 store.save_last_profile(&profile.name)?;
                 auto_bind(store, workspaces, &profile.name)?;
                 return launch::launch(tool, &profile, &[]);
@@ -213,6 +215,7 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
                 tool,
                 profile,
             } => {
+                prepare_codex_plugins(store, tool, &profile)?;
                 store.save_last_profile(&profile.name)?;
                 selected = Some(profile.name.clone());
                 launch::authenticate(operation, tool, &profile)?;
@@ -340,6 +343,7 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             created["created"] = json!(true);
             created["settings_copied"] = json!(copied.copied);
             created["shared"] = json!(linked.linked);
+            created["shared_copied"] = json!(linked.copied);
             let mut sign_in = json!({
                 "claude": format!("ditto-cli claude {} -- auth login", profile.name),
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
@@ -504,6 +508,7 @@ fn sync_payload(outcome: &SyncOutcome) -> Value {
         "copied": outcome.copied.copied,
         "kept": outcome.copied.kept,
         "shared": outcome.linked.linked,
+        "shared_copied": outcome.linked.copied,
         "shared_kept": outcome.linked.kept,
         "shared_failed": outcome
             .linked
@@ -536,6 +541,13 @@ fn sync_payload(outcome: &SyncOutcome) -> Value {
 }
 
 fn print_sync(outcome: &SyncOutcome) {
+    if !outcome.linked.copied.is_empty() {
+        println!(
+            "Copied local plugin code into '{}': {}.",
+            outcome.profile,
+            outcome.linked.copied.join(", ")
+        );
+    }
     if outcome.copied.changed() {
         println!(
             "Copied into '{}': {}.",
@@ -843,6 +855,7 @@ fn launch_codex_app(store: &Store, workspaces: &Workspaces, arguments: CodexAppA
             fallback.describe()
         );
     }
+    prepare_codex_plugins(store, Tool::Codex, &profile)?;
     launch::launch_codex_desktop(
         &profile,
         store.user_home(),
@@ -862,6 +875,7 @@ fn launch_direct(
     arguments: LaunchArgs,
 ) -> Result<()> {
     let (profile, fell_back) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
+    prepare_codex_plugins(store, tool, &profile)?;
     store.save_last_profile(&profile.name)?;
 
     // The saved fallback is the one answer nothing on screen points at: the
@@ -888,6 +902,19 @@ fn launch_direct(
     }
 
     launch::launch(tool, &profile, &arguments.args)
+}
+
+fn prepare_codex_plugins(store: &Store, tool: Tool, profile: &Profile) -> Result<()> {
+    if tool == Tool::Codex && profile.managed {
+        let source = store.load_profile(DEFAULT_PROFILE)?;
+        if codex_plugins::sync(&source, profile)? {
+            eprintln!(
+                "ditto-cli: copied Codex plugin code inside profile '{}' for its trusted loader",
+                profile.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// An explicit name always wins. Without one the directory decides, then the

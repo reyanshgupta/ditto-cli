@@ -31,10 +31,10 @@ pub fn sync(source: &Profile, target: &Profile) -> Result<bool> {
         Ok(metadata) if !metadata.is_dir() => {
             bail!("{} is not a plugin directory", into.display());
         }
-        Ok(_) => copy_missing(&from.join("cache"), &into.join("cache")),
+        Ok(_) => copy_cache(&from, &into),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             create_directory(&into)?;
-            copy_missing(&from.join("cache"), &into.join("cache"))
+            copy_cache(&from, &into)
         }
         Err(error) => Err(error).with_context(|| format!("could not inspect {}", into.display())),
     }
@@ -46,7 +46,7 @@ fn migrate(from: &Path, into: &Path) -> Result<()> {
     // files left by an interrupted migration.
     create_directory(&stage)?;
     let result = (|| {
-        copy_missing(&from.join("cache"), &stage.join("cache"))?;
+        copy_cache(from, &stage)?;
         let mut backup = into.with_file_name("plugins.before-ditto");
         for n in 1.. {
             match fs::symlink_metadata(&backup) {
@@ -80,7 +80,53 @@ fn create_directory(path: &Path) -> Result<()> {
     secure_directory(path)
 }
 
-fn copy_missing(from: &Path, into: &Path) -> Result<bool> {
+/// The cache holds the plugin code; what sits beside it is runtime state. It is
+/// also the boundary a link found inside it has to stay within, so the walk
+/// carries both ends of it.
+fn copy_cache(from: &Path, into: &Path) -> Result<bool> {
+    let (from, into) = (from.join("cache"), into.join("cache"));
+    copy_missing(&from, &into, (&from, &into))
+}
+
+/// A plugin may point inside its own cache: Codex ships the bundled ones with a
+/// `latest` link beside the versioned directory it names. The link is part of
+/// the installation, so it is recreated against the profile's own copy and what
+/// Codex resolves still lands under CODEX_HOME. Following it instead would
+/// duplicate the version it names, and a link leading anywhere but the cache is
+/// not the installation and is still refused.
+fn copy_link(from: &Path, into: &Path, roots: (&Path, &Path)) -> Result<bool> {
+    let inside = match (fs::canonicalize(from), fs::canonicalize(roots.0)) {
+        (Ok(target), Ok(root)) => target.strip_prefix(&root).map(Path::to_path_buf).ok(),
+        _ => None,
+    };
+    let Some(inside) = inside else {
+        bail!(
+            "{} does not resolve inside the plugin cache; install this plugin directly in the profile",
+            from.display()
+        );
+    };
+    // Only what the profile is missing is written, so a link already there is
+    // the user's and a second launch changes nothing.
+    if fs::symlink_metadata(into).is_ok() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(roots.1.join(inside), into)
+            .with_context(|| format!("could not create {}", into.display()))?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = inside;
+        bail!(
+            "{} is a plugin link this platform cannot recreate; install this plugin directly in the profile",
+            from.display()
+        )
+    }
+}
+
+fn copy_missing(from: &Path, into: &Path, roots: (&Path, &Path)) -> Result<bool> {
     let source = match fs::symlink_metadata(from) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -88,9 +134,12 @@ fn copy_missing(from: &Path, into: &Path) -> Result<bool> {
             return Err(error).with_context(|| format!("could not inspect {}", from.display()));
         }
     };
-    // Following arbitrary cache links could import files outside the plugin
-    // installation, while preserving them would recreate the trust failure.
-    if source.is_symlink() || !(source.is_dir() || source.is_file()) {
+    if source.is_symlink() {
+        return copy_link(from, into, roots);
+    }
+    // Anything that is neither a file nor a directory is not plugin code, and
+    // copying it would hand the loader something it was never meant to run.
+    if !(source.is_dir() || source.is_file()) {
         bail!(
             "{} is not a regular plugin file or directory; install this plugin directly in the profile",
             from.display()
@@ -130,7 +179,7 @@ fn copy_missing(from: &Path, into: &Path) -> Result<bool> {
     for entry in fs::read_dir(from).with_context(|| format!("could not read {}", from.display()))? {
         let entry =
             entry.with_context(|| format!("could not read an entry in {}", from.display()))?;
-        changed |= copy_missing(&entry.path(), &into.join(entry.file_name()))?;
+        changed |= copy_missing(&entry.path(), &into.join(entry.file_name()), roots)?;
     }
     Ok(changed)
 }
@@ -294,6 +343,39 @@ mod tests {
         symlink(&custom, plugins.join("cache")).unwrap();
         assert!(sync(&source, &target).is_err());
         assert_eq!(fs::read(custom.join("service")).unwrap(), b"custom");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recreates_a_bundled_link_against_the_profile_copy_it_names() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().unwrap();
+        let store = Store::new(temp.path().join("ditto"), temp.path().join("home"));
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        let target = store.create_profile("work").unwrap();
+        let chrome = source
+            .codex_home
+            .join("plugins/cache/openai-bundled/chrome");
+        write_private_bytes(&chrome.join("26.901/plugin.json"), b"code").unwrap();
+        symlink(chrome.join("26.901"), chrome.join("latest")).unwrap();
+        assert!(sync(&source, &target).unwrap());
+        let copied = target
+            .codex_home
+            .join("plugins/cache/openai-bundled/chrome/latest");
+        assert_eq!(
+            fs::read_link(&copied).unwrap(),
+            target
+                .codex_home
+                .join("plugins/cache/openai-bundled/chrome/26.901")
+        );
+        assert_eq!(fs::read(copied.join("plugin.json")).unwrap(), b"code");
+        // What Codex resolves has to stay inside the profile it was pointed at.
+        assert!(
+            fs::canonicalize(&copied)
+                .unwrap()
+                .starts_with(fs::canonicalize(&target.codex_home).unwrap())
+        );
+        assert!(!sync(&source, &target).unwrap());
     }
 
     #[test]

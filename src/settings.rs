@@ -52,7 +52,9 @@ impl Copied {
 /// for: a profile is a place to differ from the defaults, and a copy that
 /// silently undid a per-profile choice would make it useless. Merging is by
 /// top-level key rather than deep, so a profile that sets its own `permissions`
-/// keeps all of it and does not end up with half of each.
+/// keeps all of it and does not end up with half of each. Plugin enablement and
+/// marketplace maps merge by entry, because choosing one plugin must not hide
+/// every plugin installed afterwards.
 pub fn copy(source: &Profile, target: &Profile, overwrite: bool) -> Result<Copied> {
     if source.claude_home == target.claude_home {
         bail!(
@@ -70,6 +72,31 @@ pub fn copy(source: &Profile, target: &Profile, overwrite: bool) -> Result<Copie
 
     for (key, value) in from {
         if key == OWNED {
+            continue;
+        }
+        if !overwrite
+            && matches!(key.as_str(), "enabledPlugins" | "extraKnownMarketplaces")
+            && let (Some(Value::Object(existing)), Value::Object(entries)) =
+                (into.get_mut(&key), &value)
+        {
+            let mut copied = false;
+            let mut kept = false;
+            for (name, entry) in entries {
+                match existing.get(name) {
+                    Some(current) if current == entry => {}
+                    Some(_) => kept = true,
+                    None => {
+                        existing.insert(name.clone(), entry.clone());
+                        copied = true;
+                    }
+                }
+            }
+            if copied {
+                result.copied.push(key.clone());
+            }
+            if kept {
+                result.kept.push(key);
+            }
             continue;
         }
         match into.get(&key) {
@@ -273,6 +300,44 @@ mod tests {
         assert_eq!(copied.copied, ["theme"]);
         assert_eq!(copied.kept, ["model"]);
         assert_eq!(settings(&target)["model"], "sonnet");
+    }
+
+    #[test]
+    fn syncing_adds_new_plugins_without_undoing_per_plugin_choices() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given(
+            &source,
+            r#"{
+            "enabledPlugins":{"old@store":true,"new@store":true},
+            "extraKnownMarketplaces":{"store":{"source":{"source":"github","repo":"org/plugins"}}}
+        }"#,
+        );
+        let target = store.create_profile("work").unwrap();
+        given(
+            &target,
+            r#"{
+            "enabledPlugins":{"old@store":false,"local@store":true},
+            "extraKnownMarketplaces":{}
+        }"#,
+        );
+
+        let copied = copy(&source, &target, false).unwrap();
+
+        assert_eq!(
+            settings(&target)["enabledPlugins"],
+            serde_json::json!({
+                "old@store":false,"new@store":true,"local@store":true
+            })
+        );
+        assert_eq!(
+            settings(&target)["extraKnownMarketplaces"],
+            settings(&source)["extraKnownMarketplaces"]
+        );
+        assert_eq!(copied.copied, ["enabledPlugins", "extraKnownMarketplaces"]);
+        assert_eq!(copied.kept, ["enabledPlugins"]);
+        assert!(!copy(&source, &target, false).unwrap().changed());
     }
 
     #[test]

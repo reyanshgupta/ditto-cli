@@ -63,6 +63,12 @@ Claude Code reads settings from several files and the profile's is the lowest-ra
 
 The other thing a launch writes is a repair, and it is the one case where Ditto rewrites something a tool wrote. A skill installer records what it installed as a *relative* symbolic link computed from the configuration directory the tool was pointed at; under a profile that directory is one of `shared.rs`'s links, so the operating system creates the record in the user's own directory instead and the relative path in it now leads somewhere else. The skill is on disk and readable from nowhere. `shared::repair_for` re-reads such a link against the path the installer was handed and, only when that names something that exists, rewrites it as an absolute link — reported on stderr at launch, and under `repaired` by `sync`, which does every tool rather than the one being started.
 
+Launch preparation also provisions missing tool roots and links newly available allowlisted paths for the selected tool, without adopting existing profile copies. `create --json` and `sync --json` expose link failures as `shared_failed`. Claude's native root follows `CLAUDE_CONFIG_DIR`, preserved as `DITTO_NATIVE_CLAUDE_CONFIG_DIR` inside launched tools. Nested launches restore the original home, XDG bases, session overrides, and credential-backend switches before applying the new selection.
+
+Codex/ChatGPT Desktop's `.codex-global-state.json` mixes local project definitions with private account and conversation state, so never link or copy the whole file. `desktop::copy` carries only local project IDs, names, folder paths, and timestamps from the default profile, preserving existing IDs and equivalent folder sets. Creation and Codex launch seed only absent state files; `sync` merges missing definitions into existing state. Quit the desktop app before syncing and reopen it afterwards: its in-memory state otherwise overwrites external edits. Account sidebar atoms, server project IDs, cloud projects, selected projects, and thread assignments stay private, including with `--overwrite` or `--adopt`. JSON reports imported names as `desktop_projects_copied`; failures use `shared_failed` with path `codex/desktop-projects`.
+
+Claude plugin installation writes absolute `installPath` values through the profile's shared plugins link. `shared::preserve_claude_plugins` changes only entries naming a Ditto profile and resolving to an existing location in that shared cache. It runs before rename and deletion, and during Claude launch and sync repairs, so those entries survive profile moves. Other plugin metadata stays intact. Claude settings sync merges `enabledPlugins` and `extraKnownMarketplaces` by entry, retaining existing per-entry choices unless `--overwrite` is set; other settings still merge by top-level key.
+
 ### Recipes
 
 ```bash
@@ -114,6 +120,8 @@ These strings are an interface. Changing one breaks callers, so treat it as a de
 | `tools[].status` | `signed_in`, `signed_out`, `unavailable` |
 | `indicator.outcome` | `installed`, `already_on`, `alongside`, `removed`, `restored`, `off`, `foreign`, `shadowed` |
 | `profiles[].managed` | `false` only for the reserved `default` profile |
+| `shared_failed` on `create` and `sync` | array of objects with `path` and `reason`; empty when every attempted link succeeded |
+| `desktop_projects_copied` on `create` and `sync` | array of local desktop project names imported from the default profile |
 
 They live in `Tool::key`, `AuthStatus::key`, and `Indicator::key`, each kept deliberately apart from the `label`/`describe` method beside it. Labels are written for a person and may be reworded freely; keys may not.
 
@@ -131,6 +139,7 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `launch.rs` | `Tool`, running a tool with the profile's environment, launching isolated Codex Desktop windows on macOS, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY` and herdr (`HERDR_PANE_ID`). |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
+| `desktop.rs` | Copying allowlisted local desktop project definitions without copying account or task state. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
 | `codex_plugins.rs` | Profile-local Codex plugin cache copies and migration of old shared plugin links, required by Codex's trusted executable loader. |
 | `history.rs` | One-time conversation backfills for every tool. File stores copy only missing files; opencode sessions cross through its export/import commands so credentials never do. |
@@ -152,6 +161,8 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
+
+On Unix, also run `cargo build` and `python3 .github/smoke.py` for the compiled CLI lifecycle and launch checks. CI runs this smoke test on Linux and macOS; it uses a temporary `HOME` as well as `DITTO_HOME`, because OMP's store is rooted in the former. Unit tests continue to cover Windows with `Store::new` fixtures.
 
 ### Conventions
 

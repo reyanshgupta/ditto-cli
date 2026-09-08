@@ -44,6 +44,8 @@ pub enum Command {
     /// Delete an isolated profile and everything inside it.
     Delete(DeleteArgs),
     /// Preserve reusable configuration for one or all isolated profiles.
+    ///
+    /// Quit Codex/ChatGPT Desktop before syncing local projects, then reopen it.
     Sync(SyncArgs),
     /// Show, pin, or release the profile commands use when none is named.
     Default(DefaultArgs),

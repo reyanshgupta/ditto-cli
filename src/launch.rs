@@ -475,9 +475,8 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
                 // below `$HOME/.fx`. The private home isolates those files. On
                 // macOS its Keychain entries are user-wide, so managed profiles
                 // deliberately select the profile-file backend instead.
-                command
-                    .env("HOME", &profile.fx_home)
-                    .env("FX_DISABLE_KEYCHAIN", "1");
+                command.env("FX_DISABLE_KEYCHAIN", "1");
+                private_home(&mut command, &profile.fx_home);
             }
         }
         Tool::Opencode => {
@@ -532,7 +531,7 @@ fn base_command(tool: Tool, profile: &Profile) -> Command {
                 }
                 Home::Private { .. } => {
                     if profile.managed {
-                        command.env("HOME", profile.tool_home(spec));
+                        private_home(&mut command, profile.tool_home(spec));
                     }
                 }
             }
@@ -709,34 +708,62 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
 /// Carries the roots from before Ditto redirected any tool into every child.
 /// A tool can invoke Ditto again through a shell command, and without these
 /// copies that nested process would mistake the active account's isolated
-/// directories for the user's own configuration.
+/// directories for the user's own configuration. A nested launch restores them
+/// before applying its own selection.
 fn preserve_native_environment(command: &mut Command) {
-    // An existing profile marker means an outer Ditto already had the only
-    // unmodified view. Its saved values are inherited automatically; filling a
-    // missing one now would preserve a directory the outer process redirected.
-    if std::env::var_os("DITTO_PROFILE").is_some() {
-        return;
-    }
-    for (variable, preserved) in NATIVE_ENVIRONMENT {
-        if std::env::var_os(preserved).is_none()
-            && let Some(value) = std::env::var_os(variable)
-        {
-            command.env(preserved, value);
-        }
-    }
+    native_environment(command, |name| std::env::var_os(name));
+}
+
+fn native_environment(command: &mut Command, variable: impl Fn(&str) -> Option<OsString>) {
+    let mut names = NATIVE_ENVIRONMENT
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    names.extend([
+        NATIVE_HOME_ENVIRONMENT.0,
+        "FX_DISABLE_KEYCHAIN",
+        "PRIME_AGENT_SESSION_DIR",
+        "PRIME_AGENT_CODING_AGENT_SESSION_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+    ]);
+    #[cfg(windows)]
+    names.push("USERPROFILE");
     for spec in tools::ALL {
-        if let Home::Variable { variable, .. } | Home::Parent { variable, .. } = spec.home
-            && std::env::var_os(preserved(variable)).is_none()
-            && let Some(value) = std::env::var_os(variable)
+        if let Home::Variable { variable, .. } | Home::Parent { variable, .. } = spec.home {
+            names.push(variable);
+        }
+        names.extend(spec.managed_env.iter().map(|(name, _)| *name));
+    }
+    for name in names {
+        let saved = preserved(name);
+        if variable(LAUNCHED_TOOL_VARIABLE).is_some() {
+            // A nested launch must restore the original environment before
+            // applying its selection, including originally unset variables.
+            // Otherwise `default` can keep the parent's private HOME or session
+            // directory and silently continue using the previous account.
+            match variable(&saved) {
+                Some(value) => {
+                    command.env(name, value);
+                }
+                None => {
+                    command.env_remove(name);
+                }
+            }
+        } else if variable("DITTO_PROFILE").is_none()
+            && variable(&saved).is_none()
+            && let Some(value) = variable(name)
         {
-            command.env(preserved(variable), value);
+            command.env(saved, value);
         }
     }
-    if std::env::var_os(NATIVE_HOME_ENVIRONMENT.1).is_none()
-        && let Some(value) = std::env::var_os(NATIVE_HOME_ENVIRONMENT.0)
-    {
-        command.env(NATIVE_HOME_ENVIRONMENT.1, value);
-    }
+}
+
+fn private_home(command: &mut Command, home: &Path) {
+    command.env("HOME", home);
+    // Native Windows tools commonly use USERPROFILE through os.homedir() or
+    // their platform directory library, even when HOME has been redirected.
+    #[cfg(windows)]
+    command.env("USERPROFILE", home);
 }
 
 /// Set to step out of the way and hand the terminal straight to the tool. The
@@ -786,7 +813,7 @@ fn proxy_wanted() -> bool {
 fn repair_shared_links(tool: Tool, profile: &Profile) {
     let repaired = shared::repair_for(tool, profile);
     for link in &repaired.links {
-        eprintln!("ditto-cli: repaired {link}; it was installed pointing at nothing");
+        eprintln!("ditto-cli: repaired {link}; restored a shared extension path");
     }
     for (link, reason) in &repaired.failed {
         eprintln!("ditto-cli: could not repair {link}: {reason}");
@@ -916,6 +943,70 @@ mod tests {
     use super::*;
 
     use crate::profile::OpencodeHome;
+
+    #[test]
+    fn nested_launches_restore_original_roots_and_unset_profile_overrides() {
+        let values = std::collections::HashMap::from([
+            (LAUNCHED_TOOL_VARIABLE, OsString::from("pi")),
+            ("DITTO_PROFILE", OsString::from("work")),
+            ("HOME", OsString::from("/profiles/work/home")),
+            ("DITTO_NATIVE_HOME", OsString::from("/original/home")),
+            (
+                "PI_CODING_AGENT_SESSION_DIR",
+                OsString::from("/profiles/work/sessions"),
+            ),
+            ("FX_DISABLE_KEYCHAIN", OsString::from("1")),
+            ("XDG_CONFIG_HOME", OsString::from("/profiles/work/config")),
+            (
+                "DITTO_NATIVE_XDG_CONFIG_HOME",
+                OsString::from("/original/config"),
+            ),
+        ]);
+        let mut command = Command::new("agent");
+        native_environment(&mut command, |name| values.get(name).cloned());
+        let changes = command
+            .get_envs()
+            .collect::<std::collections::HashMap<_, _>>();
+        for (name, expected) in [
+            ("HOME", "/original/home"),
+            ("XDG_CONFIG_HOME", "/original/config"),
+        ] {
+            assert_eq!(
+                changes[std::ffi::OsStr::new(name)],
+                Some(std::ffi::OsStr::new(expected))
+            );
+        }
+        for name in [
+            "PI_CODING_AGENT_SESSION_DIR",
+            "FX_DISABLE_KEYCHAIN",
+            "GOOSE_DISABLE_KEYRING",
+        ] {
+            assert_eq!(changes[std::ffi::OsStr::new(name)], None);
+        }
+    }
+
+    #[test]
+    fn first_launches_preserve_custom_session_and_credential_backend_settings() {
+        let values = std::collections::HashMap::from([
+            ("HOME", OsString::from("/original/home")),
+            (
+                "PRIME_AGENT_SESSION_DIR",
+                OsString::from("/original/sessions"),
+            ),
+            ("GOOSE_DISABLE_KEYRING", OsString::from("0")),
+        ]);
+        let mut command = Command::new("agent");
+        native_environment(&mut command, |name| values.get(name).cloned());
+        let changes = command
+            .get_envs()
+            .collect::<std::collections::HashMap<_, _>>();
+        for (name, expected) in &values {
+            assert_eq!(
+                changes[std::ffi::OsStr::new(&preserved(name))],
+                Some(expected.as_os_str())
+            );
+        }
+    }
 
     fn profile() -> Profile {
         Profile {

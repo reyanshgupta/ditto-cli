@@ -22,7 +22,7 @@ pub(crate) const LAUNCHED_TOOL_VARIABLE: &str = "DITTO_LAUNCHED_TOOL";
 
 /// The variables Ditto redirects whose ambient values define part of the
 /// `default` profile, paired with private copies carried into launched tools.
-pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 6] = [
+pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 7] = [
     ("XDG_DATA_HOME", "DITTO_NATIVE_XDG_DATA_HOME"),
     ("XDG_CONFIG_HOME", "DITTO_NATIVE_XDG_CONFIG_HOME"),
     ("XDG_STATE_HOME", "DITTO_NATIVE_XDG_STATE_HOME"),
@@ -36,6 +36,7 @@ pub(crate) const NATIVE_ENVIRONMENT: [(&str, &str); 6] = [
     // environment is already signed in as, so it follows the variable rather
     // than insisting on `~/.codex` and quietly undoing that choice.
     ("CODEX_HOME", "DITTO_NATIVE_CODEX_HOME"),
+    ("CLAUDE_CONFIG_DIR", "DITTO_NATIVE_CLAUDE_CONFIG_DIR"),
 ];
 
 /// fx has no configuration-root override and reads `$HOME/.fx`. Ditto carries
@@ -213,6 +214,7 @@ fn configured_home(value: Option<OsString>, user_home: &Path, fallback: PathBuf)
 /// wherever the environment already sends them.
 #[derive(Clone, Debug)]
 struct NativeHomes {
+    claude: PathBuf,
     opencode: OpencodeHome,
     pi: PathBuf,
     prime_agent: PathBuf,
@@ -226,6 +228,7 @@ impl NativeHomes {
     #[cfg(test)]
     fn plain(user_home: &Path) -> Self {
         Self {
+            claude: user_home.join(".claude"),
             opencode: OpencodeHome::native(user_home),
             pi: user_home.join(".pi").join("agent"),
             prime_agent: user_home.join(".prime").join("agent"),
@@ -319,6 +322,15 @@ fn native_homes(
         user_home,
         user_home.join(".codex"),
     );
+    let native_claude = configured_home(
+        original(
+            NATIVE_ENVIRONMENT[6].0,
+            NATIVE_ENVIRONMENT[6].1,
+            Path::new("claude"),
+        ),
+        user_home,
+        user_home.join(".claude"),
+    );
     let generic = tools::ALL
         .iter()
         .map(|spec| match spec.home {
@@ -341,6 +353,7 @@ fn native_homes(
         .collect();
 
     NativeHomes {
+        claude: native_claude,
         opencode: native_opencode,
         pi: native_pi,
         prime_agent: native_prime_agent,
@@ -530,6 +543,7 @@ impl Store {
         if move_omp_profile && omp_destination.exists() {
             bail!("OMP profile '{new_name}' already exists");
         }
+        crate::shared::preserve_claude_plugins(&self.managed_profile(current_name))?;
 
         // Both the last-used and the pinned profile are stored by name, so a
         // rename has to carry them across or they would point at nothing.
@@ -600,6 +614,7 @@ impl Store {
         if !root.is_dir() {
             bail!("profile '{name}' does not exist");
         }
+        crate::shared::preserve_claude_plugins(&self.managed_profile(name))?;
 
         let mut state = self.read_state()?;
         let mut state_is_stale = false;
@@ -785,7 +800,7 @@ impl Store {
     fn default_profile(&self) -> Profile {
         Profile {
             name: DEFAULT_PROFILE.to_owned(),
-            claude_home: self.user_home.join(".claude"),
+            claude_home: self.native.claude.clone(),
             codex_home: self.native.codex.clone(),
             fx_home: self.user_home.clone(),
             omp_home: self.user_home.join(".omp").join("agent"),
@@ -1061,6 +1076,43 @@ mod tests {
         let native = native_homes(&home, &root, |name| values.get(name).cloned());
 
         assert_eq!(native.codex, chosen);
+    }
+
+    #[test]
+    fn follows_a_custom_claude_home_and_preserves_it_in_nested_launches() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("home");
+        let root = home.join(".ditto");
+        let chosen = home.join("custom-claude");
+        for values in [
+            std::collections::HashMap::from([(
+                "CLAUDE_CONFIG_DIR",
+                chosen.clone().into_os_string(),
+            )]),
+            std::collections::HashMap::from([
+                (LAUNCHED_TOOL_VARIABLE, OsString::from("claude")),
+                ("DITTO_PROFILE", OsString::from("work")),
+                (
+                    "CLAUDE_CONFIG_DIR",
+                    root.join("profiles/work/claude").into_os_string(),
+                ),
+                (
+                    "DITTO_NATIVE_CLAUDE_CONFIG_DIR",
+                    chosen.clone().into_os_string(),
+                ),
+            ]),
+        ] {
+            let native = native_homes(&home, &root, |name| values.get(name).cloned());
+            let store = Store {
+                root: root.clone(),
+                user_home: home.clone(),
+                native,
+            };
+            assert_eq!(
+                store.load_profile(DEFAULT_PROFILE).unwrap().claude_home,
+                chosen
+            );
+        }
     }
 
     #[test]

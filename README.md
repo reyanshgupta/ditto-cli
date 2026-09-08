@@ -646,7 +646,7 @@ The `tool`, `status`, and `indicator` outcome strings are stable identifiers mea
 
 Claude Code reads its settings from the configuration directory it is pointed at, and Ditto CLI points it somewhere else. Left alone, a new profile would start with none of the permission mode, model, effort level, or hooks you set up once and expect everywhere.
 
-So creating a profile copies `~/.claude/settings.json` into it. What Ditto CLI isolates is accounts, and none of those live in that file — Claude Code keeps credentials in the Keychain and the signed-in account in `.claude.json` — so your preferences travel and your logins stay apart. The status line travels too: the entry names the profile it was installed for, so what is copied is the status line underneath it, with the new profile's own indicator drawn in front of yours.
+So creating a profile copies your Claude Code `settings.json` into it, following `CLAUDE_CONFIG_DIR` when set and otherwise using `~/.claude`. Claude Code's normal login state stays separate. API keys you explicitly put in shared settings or environment variables remain shared. The status line travels too: the entry names the profile it was installed for, so what is copied is the status line underneath it, with the new profile's own indicator drawn in front of yours.
 
 From then on the profile's settings are its own. Change the model in one profile and the others keep theirs; a later `ditto-cli sync` fills in settings the profile has never answered and leaves the ones it has:
 
@@ -658,25 +658,31 @@ ditto-cli sync client-a --overwrite  # your configuration wins outright
 
 Naming a profile preserves configuration for that profile only; `--all` makes the scope every managed profile. `sync` is also how profiles created before this behaviour existed catch up, including tool directories added by a newer Ditto release.
 
+Plugin lists merge by plugin name: `sync` adds new `enabledPlugins` and `extraKnownMarketplaces` entries while keeping each existing choice, including a plugin you disabled in that profile. Other settings still merge by top-level key. A plugin installed later into your own Claude Code setup therefore becomes available to an existing profile after `ditto-cli sync <profile>`.
+
 ## Skills, subagents, and everything else you set up once
 
 A profile exists to be signed in as somebody else, not to be a different working environment. Skills, subagents, slash commands, hooks, plugins, and the memory file each tool reads are not accounts, so a profile does not get its own copy of them — it reads yours:
 
 | Tool | Read from your own configuration |
 | --- | --- |
-| Claude Code | `skills`, `agents`, `commands`, `hooks`, `plugins`, `output-styles`, `CLAUDE.md` |
-| Codex | `skills`, `rules`, `prompts`, `config.toml`, `hooks.json`, `AGENTS.md`, `instructions.md`; plugin code is copied as described below |
+| Claude Code | `skills`, `agents`, `commands`, `hooks`, `plugins`, `output-styles`, `keybindings.json`, `CLAUDE.md` |
+| Codex | `skills`, `agents`, `rules`, `prompts`, `config.toml`, `hooks.json`, `AGENTS.md`, `instructions.md`; plugin code is copied as described below |
 | opencode | the whole configuration directory |
 | OMP | `config.yml`, `extensions` |
 | Prime Agent | `settings.json`, `keybindings.json`, instructions, prompts, skills, extensions, themes, packages, and the global harness |
 | Pi | `settings.json`, `keybindings.json`, project trust, instructions, prompts, skills, extensions, themes, packages, and managed tools |
 | Every other agent | its settings, instructions, skills, commands, and plugins — the entry in [`src/tools.rs`](src/tools.rs) names them |
 
-The shared configuration paths are symbolic links, so a skill you write tomorrow is in every profile the moment you save it, with nothing to sync. Everything else, including `.claude.json`, `auth.json`, sessions, session artifacts, history, and `agent.db`, stays inside the profile. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
+These are symbolic links, so additions to an already shared directory appear immediately. If you create your first skills or plugins directory after making a profile, the next launch links it for that tool; `sync` checks every tool. An existing directory owned by the profile is kept. `create --json` and `sync --json` report linking problems under `shared_failed`, and launches report them on stderr. Files containing normal account and conversation state — `.claude.json`, `auth.json`, sessions, session artifacts, history, `agent.db` — stay inside the profile. Prime Agent and Pi keep `models.json` private too, because custom provider definitions may contain literal API keys and secret headers.
 
 Codex's `plugins/cache` is the exception: its browser service loader resolves symbolic links and refuses executable code outside the selected `CODEX_HOME`. Ditto copies missing cache files into a real profile-local plugin directory during creation, `sync`, and Codex CLI or Desktop launch. Existing profile files are never overwritten, including with `--adopt` or `--overwrite`; Codex manages its local updates. Newly installed versions from the default profile are picked up at the next sync or launch. Plugin runtime state beside the cache is not copied.
 
-Older Ditto plugin links are migrated automatically: Ditto prepares the local cache first, preserves the old link as `plugins.before-ditto` (with a numbered suffix if needed), and installs the directory. The original shared plugin files remain untouched. Custom plugin links and symbolic links inside the cache are reported for manual installation in the profile rather than followed. Restart an already open Codex Desktop window after migration so its loader resolves the new paths. JSON `create` and `sync` reports include `shared_copied` for caches copied locally; `shared` continues to list symbolic links.
+Older Ditto plugin links are migrated automatically: Ditto prepares the local cache first, preserves the old link as `plugins.before-ditto` (with a numbered suffix if needed), and installs the directory. The original shared plugin files remain untouched. Custom plugin links and cache links resolving outside the cache are reported for manual installation in the profile. Bundled links within the cache are recreated against the profile’s own copy. Restart an already open Codex Desktop window after migration so its loader resolves the new paths. JSON `create` and `sync` reports include `shared_copied` for caches copied locally; `shared` continues to list symbolic links.
+
+Codex and ChatGPT Desktop also keep their local project list under `CODEX_HOME`. Ditto copies project names and folder mappings into new profile state, so switching accounts does not start with an empty project list. Existing profiles can import missing projects with `ditto-cli sync <profile>`: **quit the desktop app before syncing, then reopen it**, because the running app keeps this state in memory and can overwrite external edits. Existing project IDs and equivalent sets of folders keep the profile's choices. This is a copy from the default profile, not live sharing; later additions need another sync. It does not copy cloud projects, sidebar account data, task history, thread assignments, or app-server project IDs. `--overwrite` and `--adopt` do not override those boundaries. JSON reports imported project names under `desktop_projects_copied` and failures under `shared_failed` with path `codex/desktop-projects`.
+
+Updates to shared plugin and skill files also reach linked profiles; the harness fetches the updates, and an already-running session may need a reload or restart. There are limits: a tool can replace a shared settings symlink with its own file, after which that file stops receiving shared updates. This is confirmed for Prime Agent 0.8.1's package settings writer. Sync reports such copies under `shared_kept` and preserves them. See the [update propagation checks](COMPATIBILITY.md#plugin-update-propagation) for verified behavior and remaining gaps.
 
 Conversation history is not linked: chats can contain account- or client-specific work, and shared writable session stores would make every profile's future activity visible to every other profile. Existing conversations, from any agent, can instead be copied once, without replacing anything already in the destination. Choose one profile explicitly or all managed profiles explicitly:
 
@@ -689,7 +695,7 @@ After the copy, every tool keeps writing to that profile's own history store.
 
 What is shared is a named list rather than everything-but-the-credentials. Ditto CLI learning about a new extension directory late costs you a missing feature; sharing a new credential file by accident would cost you the isolation the tool exists for.
 
-Profiles created before this have real directories where the links go. `sync` reports those and leaves them alone; `--adopt` points them at yours, moving what was there aside as `<name>.before-ditto` rather than deleting it:
+Profiles created before this have real directories where the links go. `sync` reports those and leaves them alone; `--adopt` points them at yours, moving what was there aside as `<name>.before-ditto` rather than deleting it. Existing symlinks are backed up too, earlier backups are retained, and a failed replacement restores the original:
 
 ```bash
 ditto-cli sync client-a           # link what can be linked, report what cannot
@@ -706,10 +712,14 @@ A skill installer — `npx skills add`, and anything else that installs into mor
 Ditto CLI is what moved the directory, so Ditto CLI is what can say where those links meant to point. Launching a tool repairs its own, which is the moment before it reads them, and says so:
 
 ```
-ditto-cli: repaired claude/skills/apple-design; it was installed pointing at nothing
+ditto-cli: repaired claude/skills/apple-design; restored a shared extension path
 ```
 
 `ditto-cli sync <profile>` does the same for every tool at once and reports them under `repaired`. A link is only rewritten when reading it against the path the installer was given names something that exists, so a link that is relative and broken for reasons of its own is left exactly as it is.
+
+Claude Code also records absolute `installPath` values in its shared plugin registry. When those paths run through a Ditto profile, Ditto points them at the real shared cache before renaming or deleting the profile. Launch and `sync` can repair stale entries from earlier renames too, provided the plugin still exists in that shared cache. Unrelated registry entries are preserved.
+
+The [compatibility audit](COMPATIBILITY.md) records what is covered by the lifecycle tests, the real CLI checks, and the remaining upstream boundaries.
 
 ## Where credentials and files are stored
 

@@ -16,10 +16,9 @@
 //! annoyance and a shared account is the failure Ditto exists to prevent, so
 //! the list below is an allowlist and the cost of that is keeping it current.
 //!
-//! Claude Code's `settings.json` is a piece of configuration that is
-//! copied instead of linked, because Ditto writes the profile's status line
-//! into it and linking would mean writing that into the user's own file. See
-//! [`crate::settings`].
+//! Claude Code settings and Codex desktop project definitions are copied
+//! instead of linked because their files also carry profile-specific state.
+//! See [`crate::settings`] and [`crate::desktop`].
 //! Codex's executable plugin cache is also copied, because its trusted loader
 //! rejects code reached through a link outside the selected home. See
 //! [`crate::codex_plugins`].
@@ -36,7 +35,7 @@ use anyhow::{Context, Result};
 
 use crate::{
     launch::Tool,
-    profile::{DEFAULT_PROFILE, Profile, Store},
+    profile::{DEFAULT_PROFILE, Profile, Store, secure_directory, write_private_file},
     tools::{self, Home},
 };
 
@@ -54,6 +53,7 @@ const CLAUDE: &[&str] = &[
     "hooks",
     "plugins",
     "output-styles",
+    "keybindings.json",
     "CLAUDE.md",
 ];
 
@@ -67,6 +67,7 @@ const CLAUDE: &[&str] = &[
 /// profile's work into another's context.
 const CODEX: &[&str] = &[
     "skills",
+    "agents",
     "rules",
     "prompts",
     "config.toml",
@@ -131,6 +132,8 @@ pub struct Linked {
     /// Executable caches copied inside the profile for tools whose trusted
     /// loaders do not accept shared directory links.
     pub copied: Vec<String>,
+    /// Local desktop projects copied without the account state stored beside them.
+    pub desktop_projects: Vec<String>,
     /// Paths now reading from the user's own configuration, whether this run
     /// made the link or found it already there.
     pub linked: Vec<String>,
@@ -148,7 +151,7 @@ pub struct Linked {
 
 impl Linked {
     pub fn changed(&self) -> bool {
-        self.changed
+        self.changed || !self.desktop_projects.is_empty()
     }
 }
 
@@ -166,31 +169,55 @@ struct Borrowed {
 /// profile's copy is moved aside and the link put in its place. Nothing is ever
 /// deleted either way.
 pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
+    link_selected(source, target, adopt, None, false)
+}
+
+/// An extension directory may first appear after a profile was created. Link
+/// it before the tool starts, while preserving any copy the profile already
+/// owns and avoiding work on unrelated tools' homes.
+pub fn link_for(tool: Tool, source: &Profile, target: &Profile) -> Result<Linked> {
+    link_selected(source, target, false, Some(tool), true)
+}
+
+fn link_selected(
+    source: &Profile,
+    target: &Profile,
+    adopt: bool,
+    tool: Option<Tool>,
+    seed_only: bool,
+) -> Result<Linked> {
     let mut result = Linked::default();
-    match crate::codex_plugins::sync(source, target) {
-        Ok(true) => {
-            result.copied.push("codex/plugins/cache".to_owned());
-            result.changed = true;
+    if tool.is_none_or(|tool| tool == Tool::Codex) {
+        match crate::codex_plugins::sync(source, target) {
+            Ok(true) => {
+                result.copied.push("codex/plugins/cache".to_owned());
+                result.changed = true;
+            }
+            Ok(false) => {}
+            Err(error) => result
+                .failed
+                .push(("codex/plugins/cache".to_owned(), format!("{error:#}"))),
         }
-        Ok(false) => {}
-        Err(error) => result
-            .failed
-            .push(("codex/plugins/cache".to_owned(), format!("{error:#}"))),
     }
     // Nothing the profile itself lives in is the user's configuration to
     // mirror: linked into the profile's private home, such a directory would
     // make the profile contain itself. Ditto's store is the obvious case, and
     // OMP's per-profile root under `~/.omp` the less obvious one.
     let holds_profile = target.directories();
-    mirror_home(
-        "fx/home",
-        &source.fx_home,
-        &target.fx_home,
-        &[".fx"],
-        &holds_profile,
-        &mut result,
-    );
+    if tool.is_none_or(|tool| tool == Tool::Fx) {
+        mirror_home(
+            "fx/home",
+            &source.fx_home,
+            &target.fx_home,
+            &[".fx"],
+            &holds_profile,
+            &mut result,
+        );
+    }
     for spec in tools::ALL {
+        if tool.is_some_and(|tool| tool != Tool::Generic(spec)) {
+            continue;
+        }
         if let Home::Private { native, owned } = spec.home {
             let keep = std::iter::once(native)
                 .chain(owned.iter().copied())
@@ -205,7 +232,7 @@ pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
             );
         }
     }
-    for borrowed in plan(source, target) {
+    for borrowed in plan(source, target, tool) {
         // A path the user does not have is not a path to share. Linking it
         // anyway would leave a profile pointing at nothing, which every tool
         // reads differently and none of them read as "empty".
@@ -222,6 +249,14 @@ pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
             Err(error) => result.failed.push((borrowed.label, format!("{error:#}"))),
         }
     }
+    if tool.is_none_or(|tool| tool == Tool::Codex) {
+        match crate::desktop::copy(source, target, seed_only) {
+            Ok(projects) => result.desktop_projects = projects,
+            Err(error) => result
+                .failed
+                .push(("codex/desktop-projects".to_owned(), format!("{error:#}"))),
+        }
+    }
     Ok(result)
 }
 
@@ -235,7 +270,7 @@ pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
 /// properly when it is asked for the same thing.
 pub fn seed(store: &Store, profile: &Profile) -> Linked {
     match store.load_profile(DEFAULT_PROFILE) {
-        Ok(source) => link(&source, profile, false).unwrap_or_default(),
+        Ok(source) => link_selected(&source, profile, false, None, true).unwrap_or_default(),
         Err(_) => Linked::default(),
     }
 }
@@ -306,7 +341,7 @@ fn mirror_home(
             .collect::<Vec<_>>();
         if !nested.is_empty() {
             let inner = into.join(entry.file_name());
-            match fs::create_dir_all(&inner) {
+            match create_parents(&inner) {
                 Ok(()) => mirror_home(
                     &entry_label,
                     &entry.path(),
@@ -347,10 +382,11 @@ fn mirror_home(
 ///
 /// Both sides come from [`paths`] rather than being written out twice, so the
 /// two can only ever name the same list in the same order.
-fn plan(source: &Profile, target: &Profile) -> Vec<Borrowed> {
+fn plan(source: &Profile, target: &Profile, tool: Option<Tool>) -> Vec<Borrowed> {
     paths(source)
         .into_iter()
         .zip(paths(target))
+        .filter(|(borrowed, _)| tool.is_none_or(|tool| tool == borrowed.tool))
         .map(|(borrowed, own)| Borrowed {
             label: borrowed.label,
             from: borrowed.path,
@@ -445,8 +481,8 @@ const SEARCH_DEPTH: usize = 3;
 /// What repairing did, so a launch can say why something appeared.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Repaired {
-    /// Links now pointing where they were installed to point, named by their
-    /// path inside the profile.
+    /// Links or plugin registries now pointing where they were installed to
+    /// point, named by their path inside the profile.
     pub links: Vec<String>,
     /// Links that could not be rewritten, each with the reason.
     pub failed: Vec<(String, String)>,
@@ -475,17 +511,104 @@ impl Repaired {
 /// names something that exists, so a link that is relative and broken for its
 /// own reasons is reported by nobody and left alone.
 pub fn repair(profile: &Profile) -> Repaired {
-    mend(paths(profile))
+    let mut result = mend(paths(profile));
+    repair_plugin_registry(profile, &mut result);
+    result
 }
 
 /// The same for one tool, which is all a launch of that tool can be about to
 /// read.
 pub fn repair_for(tool: Tool, profile: &Profile) -> Repaired {
-    mend(
+    let mut result = mend(
         paths(profile)
             .into_iter()
             .filter(|owned| owned.tool == tool),
-    )
+    );
+    if tool == Tool::Claude {
+        repair_plugin_registry(profile, &mut result);
+    }
+    result
+}
+
+fn repair_plugin_registry(profile: &Profile, result: &mut Repaired) {
+    let label = "claude/plugins/installed_plugins.json".to_owned();
+    match preserve_claude_plugins(profile) {
+        Ok(true) => result.links.push(label),
+        Ok(false) => {}
+        Err(error) => result.failed.push((label, format!("{error:#}"))),
+    }
+}
+
+/// Claude records installation paths through the directory it was handed,
+/// even when the plugin cache is shared. An absolute path through a profile
+/// stops working after rename or deletion, so keep the registry pointing at
+/// the cache's real location before moving either profile root.
+pub fn preserve_claude_plugins(profile: &Profile) -> Result<bool> {
+    let plugins = profile.claude_home.join("plugins");
+    if !profile.managed || !fs::symlink_metadata(&plugins).is_ok_and(|entry| entry.is_symlink()) {
+        return Ok(false);
+    }
+    let registry = plugins.join("installed_plugins.json");
+    let contents = match fs::read_to_string(&registry) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", registry.display()));
+        }
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("could not parse {}", registry.display()))?;
+    let Some(entries) = value
+        .get_mut("plugins")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    let shared = fs::canonicalize(&plugins)
+        .with_context(|| format!("could not resolve {}", plugins.display()))?;
+    let Some(profiles_root) = profile.claude_home.parent().and_then(Path::parent) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for installations in entries
+        .values_mut()
+        .filter_map(serde_json::Value::as_array_mut)
+    {
+        for installation in installations {
+            let Some(installed) = installation
+                .get("installPath")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Ok(relative) = Path::new(installed).strip_prefix(profiles_root) else {
+                continue;
+            };
+            let mut components = relative.components();
+            if !matches!(components.next(), Some(Component::Normal(_))) {
+                continue;
+            }
+            let Ok(cache_path) = components.as_path().strip_prefix("claude/plugins") else {
+                continue;
+            };
+            // A stale entry can name an older profile. Recover only a path
+            // whose files still exist inside this same shared plugin cache.
+            let Ok(actual) = fs::canonicalize(shared.join(cache_path)) else {
+                continue;
+            };
+            if !actual.starts_with(&shared) {
+                continue;
+            }
+            installation["installPath"] = serde_json::Value::String(actual.display().to_string());
+            changed = true;
+        }
+    }
+    if changed {
+        let mut contents = serde_json::to_string_pretty(&value)?;
+        contents.push('\n');
+        write_private_file(&registry, &contents)?;
+    }
+    Ok(changed)
 }
 
 fn mend(paths: impl IntoIterator<Item = Owned>) -> Repaired {
@@ -598,6 +721,9 @@ fn attach(borrowed: &Borrowed, adopt: bool) -> Result<Outcome> {
     // somewhere is read as a link rather than as whatever it leads to.
     match fs::symlink_metadata(&borrowed.into) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = borrowed.into.parent() {
+                create_parents(parent)?;
+            }
             symlink(&borrowed.from, &borrowed.into)?;
             Ok(Outcome::Created)
         }
@@ -616,23 +742,50 @@ fn attach(borrowed: &Borrowed, adopt: bool) -> Result<Outcome> {
             if !adopt {
                 return Ok(Outcome::Kept);
             }
-            fs::remove_file(&borrowed.into)
-                .with_context(|| format!("could not replace {}", borrowed.into.display()))?;
-            symlink(&borrowed.from, &borrowed.into)?;
-            Ok(Outcome::Created)
+            adopt_path(borrowed)
         }
         Ok(_) if !adopt => Ok(Outcome::Kept),
-        Ok(_) => {
-            displace(&borrowed.into)?;
-            symlink(&borrowed.from, &borrowed.into)?;
-            Ok(Outcome::Created)
-        }
+        Ok(_) => adopt_path(borrowed),
     }
+}
+
+/// Nested allowlist entries need parents that a fresh CLI has not created yet.
+/// Only new directories are secured: an existing parent may be the user's own
+/// directory reached through a link, whose permissions are theirs to choose.
+fn create_parents(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_parents(parent)?;
+    }
+    match fs::create_dir(path) {
+        Ok(()) => secure_directory(path),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("could not create {}", path.display())),
+    }
+}
+
+fn adopt_path(borrowed: &Borrowed) -> Result<Outcome> {
+    let aside = displace(&borrowed.into)?;
+    if let Err(error) = symlink(&borrowed.from, &borrowed.into) {
+        // Windows can allow the rename but refuse the link. Put the original
+        // back so a failed sync does not hide previously working capabilities.
+        fs::rename(&aside, &borrowed.into).with_context(|| {
+            format!(
+                "{error:#}; could not restore {}; the original remains at {}",
+                borrowed.into.display(),
+                aside.display()
+            )
+        })?;
+        return Err(error);
+    }
+    Ok(Outcome::Created)
 }
 
 /// Moves what the profile already had out of the way under a name that says why
 /// it moved, keeping earlier ones rather than landing on them.
-fn displace(path: &Path) -> Result<()> {
+fn displace(path: &Path) -> Result<PathBuf> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -649,11 +802,17 @@ fn displace(path: &Path) -> Result<()> {
             format!(".{attempt}")
         };
         let aside = parent.join(format!("{name}.{DISPLACED}{suffix}"));
-        if aside.exists() {
-            continue;
+        match fs::symlink_metadata(&aside) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not inspect {}", aside.display()));
+            }
         }
-        return fs::rename(path, &aside)
-            .with_context(|| format!("could not move {} to {}", path.display(), aside.display()));
+        fs::rename(path, &aside)
+            .with_context(|| format!("could not move {} to {}", path.display(), aside.display()))?;
+        return Ok(aside);
     }
     unreachable!("the loop returns on the first name that is free")
 }
@@ -768,6 +927,245 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_shared_path_survives_creation_sync_rename_and_deletion() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        for owned in paths(&source) {
+            if owned.path.extension().is_some() {
+                fs::create_dir_all(owned.path.parent().unwrap()).unwrap();
+                fs::write(&owned.path, "original").unwrap();
+            } else {
+                given_directory(&owned.path, "capability.txt");
+            }
+        }
+        for spec in tools::ALL {
+            for name in spec.credentials.iter().chain(spec.sessions) {
+                given_directory(&source.tool_path(spec, name), "private.txt");
+            }
+        }
+        let target = store.create_profile("work").unwrap();
+        let linked = link(&source, &target, false).unwrap();
+        assert!(linked.failed.is_empty(), "{:?}", linked.failed);
+        for spec in tools::ALL {
+            for name in spec.credentials.iter().chain(spec.sessions) {
+                assert!(
+                    !target.tool_path(spec, name).join("private.txt").exists(),
+                    "{}/{name} leaked account state",
+                    spec.key
+                );
+            }
+        }
+        for borrowed in plan(&source, &target, None) {
+            assert_eq!(
+                fs::canonicalize(&borrowed.into).unwrap(),
+                fs::canonicalize(&borrowed.from).unwrap(),
+                "{}",
+                borrowed.label
+            );
+        }
+        assert!(!link(&source, &target, false).unwrap().changed());
+        let renamed = store.rename_profile("work", "client").unwrap();
+        for borrowed in plan(&source, &renamed, None) {
+            assert!(borrowed.into.exists(), "{}", borrowed.label);
+        }
+        store.delete_profile("client").unwrap();
+        for owned in paths(&source) {
+            assert!(owned.path.exists(), "{}", owned.label);
+        }
+    }
+
+    #[test]
+    fn updates_to_every_shared_path_reach_existing_profiles_without_sync() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        for owned in paths(&source) {
+            if owned.path.extension().is_some() {
+                fs::create_dir_all(owned.path.parent().unwrap()).unwrap();
+                fs::write(&owned.path, "version 1").unwrap();
+            } else {
+                given_directory(&owned.path, "version.txt");
+            }
+        }
+        let first = store.create_profile("work").unwrap();
+        let second = store.create_profile("personal").unwrap();
+        for target in [&first, &second] {
+            assert!(link(&source, target, false).unwrap().failed.is_empty());
+        }
+
+        // Updaters commonly replace files or whole version directories instead
+        // of editing them in place. Links must follow the stable source path.
+        for owned in paths(&source) {
+            if owned.path.is_file() {
+                write_private_file(&owned.path, "version 2").unwrap();
+            } else {
+                let previous = owned.path.with_extension("previous");
+                fs::rename(&owned.path, &previous).unwrap();
+                fs::create_dir(&owned.path).unwrap();
+                fs::write(owned.path.join("version.txt"), "version 2").unwrap();
+                fs::remove_dir_all(previous).unwrap();
+            }
+        }
+        for target in [&first, &second] {
+            for owned in paths(target) {
+                let file = if owned.path.is_dir() {
+                    owned.path.join("version.txt")
+                } else {
+                    owned.path
+                };
+                assert_eq!(
+                    fs::read_to_string(file).unwrap(),
+                    "version 2",
+                    "{}",
+                    owned.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_upstream_writer_replacing_a_shared_file_is_reported_as_a_local_copy() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        fs::create_dir_all(&source.prime_agent_home).unwrap();
+        let native = source.prime_agent_home.join("settings.json");
+        fs::write(&native, r#"{"packages":["fixture@1"]}"#).unwrap();
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+
+        // Prime Agent's atomic save replaces the link itself. Recovering by
+        // overwriting either copy would discard a choice the user just made.
+        let local = target.prime_agent_home.join("settings.json");
+        write_private_file(&local, r#"{"packages":["local@2"]}"#).unwrap();
+        write_private_file(&native, r#"{"packages":["fixture@3"]}"#).unwrap();
+        let linked = link(&source, &target, false).unwrap();
+
+        assert!(
+            linked
+                .kept
+                .contains(&"prime-agent/settings.json".to_owned())
+        );
+        assert_eq!(
+            fs::read_to_string(local).unwrap(),
+            r#"{"packages":["local@2"]}"#
+        );
+        assert_eq!(
+            fs::read_to_string(native).unwrap(),
+            r#"{"packages":["fixture@3"]}"#
+        );
+    }
+
+    #[test]
+    fn a_codex_profile_keeps_the_custom_agents_its_config_references() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.codex_home.join("agents"), "reviewer.toml");
+        fs::write(
+            source.codex_home.join("config.toml"),
+            "[agents.reviewer]\nconfig_file = 'agents/reviewer.toml'\n",
+        )
+        .unwrap();
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.codex_home.join("agents/reviewer.toml")).unwrap(),
+            "yours"
+        );
+    }
+
+    #[test]
+    fn claude_plugins_installed_through_a_profile_survive_rename_and_deletion() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        let cache = "plugins/cache/local/fixture/1.0.0";
+        given_directory(&source.claude_home.join(cache), "plugin.json");
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let registry = source.claude_home.join("plugins/installed_plugins.json");
+        let mut contents = serde_json::json!({
+            "version": 2,
+            "plugins": {"fixture@local": [{
+                "scope": "user", "installPath": target.claude_home.join(cache),
+                "version": "1.0.0", "unknownFutureField": true
+            }]}
+        });
+        fs::write(&registry, contents.to_string()).unwrap();
+        let renamed = store.rename_profile("work", "client").unwrap();
+        contents["plugins"]["fixture@local"][0]["installPath"] =
+            serde_json::json!(fs::canonicalize(source.claude_home.join(cache)).unwrap());
+        let read = || {
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap())
+                .unwrap()
+        };
+        assert_eq!(read(), contents);
+
+        let mut installed_after_rename = contents.clone();
+        installed_after_rename["plugins"]["fixture@local"][0]["installPath"] =
+            serde_json::json!(renamed.claude_home.join(cache));
+        fs::write(&registry, installed_after_rename.to_string()).unwrap();
+        store.delete_profile("client").unwrap();
+        assert_eq!(read(), contents);
+        assert!(source.claude_home.join(cache).join("plugin.json").exists());
+    }
+
+    #[test]
+    fn repairs_stale_claude_plugin_paths_without_changing_unrelated_records() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        let cache = "plugins/cache/local/fixture/1.0.0";
+        given_directory(&source.claude_home.join(cache), "plugin.json");
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        let registry = source.claude_home.join("plugins/installed_plugins.json");
+        let unrelated = temporary.path().join("unrelated-plugin");
+        given_directory(&unrelated, "plugin.json");
+        let mut contents = serde_json::json!({"version": 2, "plugins": {
+            "fixture@local": [{"installPath": store.root().join("profiles/deleted/claude").join(cache)}],
+            "unrelated@local": [{"installPath": unrelated}],
+            "missing@local": [{"installPath": target.claude_home.join("plugins/cache/missing")}]
+        }});
+        fs::write(&registry, contents.to_string()).unwrap();
+        let repaired = repair_for(Tool::Claude, &target);
+        assert!(repaired.failed.is_empty());
+        assert_eq!(repaired.links, ["claude/plugins/installed_plugins.json"]);
+        contents["plugins"]["fixture@local"][0]["installPath"] =
+            serde_json::json!(fs::canonicalize(source.claude_home.join(cache)).unwrap());
+        let actual: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        assert_eq!(actual, contents);
+        assert!(!repair_for(Tool::Claude, &target).changed());
+    }
+
+    #[test]
+    fn adopting_preserves_foreign_links_and_dangling_backups() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        given_directory(&source.claude_home.join("plugins"), "shared.json");
+        let target = store.create_profile("work").unwrap();
+        let private = target.claude_home.join("private-plugins");
+        given_directory(&private, "local.json");
+        symlink(&private, &target.claude_home.join("plugins")).unwrap();
+        let old_backup = target.claude_home.join("plugins.before-ditto");
+        symlink(&private, &old_backup).unwrap();
+        fs::remove_dir_all(&private).unwrap();
+
+        link(&source, &target, true).unwrap();
+
+        assert_eq!(fs::read_link(&old_backup).unwrap(), private);
+        assert_eq!(
+            fs::read_link(target.claude_home.join("plugins.before-ditto.1")).unwrap(),
+            private
+        );
+        assert!(target.claude_home.join("plugins/shared.json").exists());
+    }
+
     /// A skill written after the profile was made has to be there too, which is
     /// the whole reason for a link rather than a copy.
     #[test]
@@ -785,6 +1183,23 @@ mod tests {
             fs::read_to_string(target.claude_home.join("skills/second.md")).unwrap(),
             "later"
         );
+    }
+
+    #[test]
+    fn launching_links_a_skills_directory_created_after_the_profile() {
+        let temporary = tempdir().unwrap();
+        let store = store(temporary.path());
+        let source = store.load_profile(DEFAULT_PROFILE).unwrap();
+        let target = store.create_profile("work").unwrap();
+        link(&source, &target, false).unwrap();
+        given_directory(&source.claude_home.join("skills"), "new.md");
+        given_directory(&source.codex_home.join("skills"), "other.md");
+
+        let linked = link_for(Tool::Claude, &source, &target).unwrap();
+
+        assert_eq!(linked.linked, ["claude/skills"]);
+        assert!(target.claude_home.join("skills/new.md").exists());
+        assert!(!target.codex_home.join("skills").exists());
     }
 
     #[test]

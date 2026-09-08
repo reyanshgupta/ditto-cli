@@ -47,3 +47,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Exercise the compiled CLI
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --locked
+          python3 .github/smoke.py

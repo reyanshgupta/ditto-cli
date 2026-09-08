@@ -1,5 +1,6 @@
 mod cli;
 mod codex_plugins;
+mod desktop;
 mod herdr;
 mod history;
 mod indicator;
@@ -194,7 +195,7 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
 
         match action {
             ui::UiAction::Launch { tool, profile } => {
-                prepare_codex_plugins(store, tool, &profile)?;
+                prepare_launch(store, tool, &profile)?;
                 store.save_last_profile(&profile.name)?;
                 auto_bind(store, workspaces, &profile.name)?;
                 return launch::launch(tool, &profile, &[]);
@@ -215,7 +216,7 @@ fn run_tui(store: &Store, workspaces: &Workspaces) -> Result<()> {
                 tool,
                 profile,
             } => {
-                prepare_codex_plugins(store, tool, &profile)?;
+                prepare_launch(store, tool, &profile)?;
                 store.save_last_profile(&profile.name)?;
                 selected = Some(profile.name.clone());
                 launch::authenticate(operation, tool, &profile)?;
@@ -344,6 +345,14 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             created["settings_copied"] = json!(copied.copied);
             created["shared"] = json!(linked.linked);
             created["shared_copied"] = json!(linked.copied);
+            created["desktop_projects_copied"] = json!(linked.desktop_projects);
+            created["shared_failed"] = json!(
+                linked
+                    .failed
+                    .iter()
+                    .map(|(path, reason)| { json!({ "path": path, "reason": reason }) })
+                    .collect::<Vec<_>>()
+            );
             let mut sign_in = json!({
                 "claude": format!("ditto-cli claude {} -- auth login", profile.name),
                 "codex": format!("ditto-cli codex {} -- login", profile.name),
@@ -387,6 +396,15 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             }
             if !linked.linked.is_empty() {
                 println!("Reading yours for: {}.", linked.linked.join(", "));
+            }
+            if !linked.desktop_projects.is_empty() {
+                println!(
+                    "Copied desktop projects: {}.",
+                    linked.desktop_projects.join(", ")
+                );
+            }
+            for (path, reason) in &linked.failed {
+                println!("Could not share {path}: {reason}");
             }
             println!(
                 "Preserve existing chats in this profile with `ditto-cli sync {} \
@@ -509,6 +527,7 @@ fn sync_payload(outcome: &SyncOutcome) -> Value {
         "kept": outcome.copied.kept,
         "shared": outcome.linked.linked,
         "shared_copied": outcome.linked.copied,
+        "desktop_projects_copied": outcome.linked.desktop_projects,
         "shared_kept": outcome.linked.kept,
         "shared_failed": outcome
             .linked
@@ -546,6 +565,12 @@ fn print_sync(outcome: &SyncOutcome) {
             "Copied local plugin code into '{}': {}.",
             outcome.profile,
             outcome.linked.copied.join(", ")
+        );
+    }
+    if !outcome.linked.desktop_projects.is_empty() {
+        println!(
+            "Copied desktop projects: {}. Open the desktop app to load them.",
+            outcome.linked.desktop_projects.join(", ")
         );
     }
     if outcome.copied.changed() {
@@ -855,7 +880,7 @@ fn launch_codex_app(store: &Store, workspaces: &Workspaces, arguments: CodexAppA
             fallback.describe()
         );
     }
-    prepare_codex_plugins(store, Tool::Codex, &profile)?;
+    prepare_launch(store, Tool::Codex, &profile)?;
     launch::launch_codex_desktop(
         &profile,
         store.user_home(),
@@ -875,7 +900,7 @@ fn launch_direct(
     arguments: LaunchArgs,
 ) -> Result<()> {
     let (profile, fell_back) = resolve_profile(store, workspaces, arguments.profile.as_deref())?;
-    prepare_codex_plugins(store, tool, &profile)?;
+    prepare_launch(store, tool, &profile)?;
     store.save_last_profile(&profile.name)?;
 
     // The saved fallback is the one answer nothing on screen points at: the
@@ -904,15 +929,26 @@ fn launch_direct(
     launch::launch(tool, &profile, &arguments.args)
 }
 
-fn prepare_codex_plugins(store: &Store, tool: Tool, profile: &Profile) -> Result<()> {
-    if tool == Tool::Codex && profile.managed {
-        let source = store.load_profile(DEFAULT_PROFILE)?;
-        if codex_plugins::sync(&source, profile)? {
-            eprintln!(
-                "ditto-cli: copied Codex plugin code inside profile '{}' for its trusted loader",
-                profile.name
-            );
+fn prepare_launch(store: &Store, tool: Tool, profile: &Profile) -> Result<()> {
+    if !profile.managed {
+        return Ok(());
+    }
+    store.ensure_profile_directories(profile)?;
+    let source = store.load_profile(DEFAULT_PROFILE)?;
+    let linked = shared::link_for(tool, &source, profile)?;
+    if !linked.copied.is_empty() {
+        eprintln!(
+            "ditto-cli: copied Codex plugin code inside profile '{}' for its trusted loader",
+            profile.name
+        );
+    }
+    for (path, reason) in &linked.failed {
+        // Codex refuses plugin code outside its trusted roots, so a failed
+        // cache migration must stop launch instead of leaving a broken loader.
+        if tool == Tool::Codex && path == "codex/plugins/cache" {
+            bail!("could not prepare {path}: {reason}");
         }
+        eprintln!("ditto-cli: could not share {path}: {reason}");
     }
     Ok(())
 }
@@ -1017,7 +1053,7 @@ fn auto_bind(store: &Store, workspaces: &Workspaces, profile: &str) -> Result<bo
 
     match workspaces.bind_file(&directory, profile) {
         Ok(path) => {
-            println!("Bound this directory to '{profile}' ({}).", path.display());
+            eprintln!("Bound this directory to '{profile}' ({}).", path.display());
             Ok(true)
         }
         // A directory there is no permission to write in is not a reason to

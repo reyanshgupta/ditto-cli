@@ -16,9 +16,8 @@
 //! annoyance and a shared account is the failure Ditto exists to prevent, so
 //! the list below is an allowlist and the cost of that is keeping it current.
 //!
-//! Claude Code settings and Codex desktop project definitions are copied
-//! instead of linked because their files also carry profile-specific state.
-//! See [`crate::settings`] and [`crate::desktop`].
+//! Claude Code settings are copied because Ditto writes a profile-specific
+//! status line. See [`crate::settings`]. Desktop project lists stay private.
 //! Codex's executable plugin cache is also copied, because its trusted loader
 //! rejects code reached through a link outside the selected home. See
 //! [`crate::codex_plugins`].
@@ -132,8 +131,6 @@ pub struct Linked {
     /// Executable caches copied inside the profile for tools whose trusted
     /// loaders do not accept shared directory links.
     pub copied: Vec<String>,
-    /// Local desktop projects copied without the account state stored beside them.
-    pub desktop_projects: Vec<String>,
     /// Paths now reading from the user's own configuration, whether this run
     /// made the link or found it already there.
     pub linked: Vec<String>,
@@ -151,7 +148,7 @@ pub struct Linked {
 
 impl Linked {
     pub fn changed(&self) -> bool {
-        self.changed || !self.desktop_projects.is_empty()
+        self.changed
     }
 }
 
@@ -169,14 +166,14 @@ struct Borrowed {
 /// profile's copy is moved aside and the link put in its place. Nothing is ever
 /// deleted either way.
 pub fn link(source: &Profile, target: &Profile, adopt: bool) -> Result<Linked> {
-    link_selected(source, target, adopt, None, false)
+    link_selected(source, target, adopt, None)
 }
 
 /// An extension directory may first appear after a profile was created. Link
 /// it before the tool starts, while preserving any copy the profile already
 /// owns and avoiding work on unrelated tools' homes.
 pub fn link_for(tool: Tool, source: &Profile, target: &Profile) -> Result<Linked> {
-    link_selected(source, target, false, Some(tool), true)
+    link_selected(source, target, false, Some(tool))
 }
 
 fn link_selected(
@@ -184,7 +181,6 @@ fn link_selected(
     target: &Profile,
     adopt: bool,
     tool: Option<Tool>,
-    seed_only: bool,
 ) -> Result<Linked> {
     let mut result = Linked::default();
     if tool.is_none_or(|tool| tool == Tool::Codex) {
@@ -249,14 +245,6 @@ fn link_selected(
             Err(error) => result.failed.push((borrowed.label, format!("{error:#}"))),
         }
     }
-    if tool.is_none_or(|tool| tool == Tool::Codex) {
-        match crate::desktop::copy(source, target, seed_only) {
-            Ok(projects) => result.desktop_projects = projects,
-            Err(error) => result
-                .failed
-                .push(("codex/desktop-projects".to_owned(), format!("{error:#}"))),
-        }
-    }
     Ok(result)
 }
 
@@ -270,7 +258,7 @@ fn link_selected(
 /// properly when it is asked for the same thing.
 pub fn seed(store: &Store, profile: &Profile) -> Linked {
     match store.load_profile(DEFAULT_PROFILE) {
-        Ok(source) => link_selected(&source, profile, false, None, true).unwrap_or_default(),
+        Ok(source) => link(&source, profile, false).unwrap_or_default(),
         Err(_) => Linked::default(),
     }
 }
@@ -848,6 +836,32 @@ fn symlink(from: &Path, into: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn keeps_desktop_projects_private_during_creation_launch_and_sync() -> Result<()> {
+        let tmp = tempdir()?;
+        let store = store(tmp.path());
+        let source = store.load_profile(DEFAULT_PROFILE)?;
+        let target = store.create_profile("work")?;
+        let filename = ".codex-global-state.json";
+        fs::create_dir_all(&source.codex_home)?;
+        fs::write(
+            source.codex_home.join(filename),
+            r#"{"local-projects":{"shareos":{"id":"shareos","name":"ShareOS","rootPaths":["/repos/shareos"],"createdAt":1,"updatedAt":2}}}"#,
+        )?;
+        seed(&store, &target);
+        link_for(Tool::Codex, &source, &target)?;
+        link(&source, &target, false)?;
+        assert!(!target.codex_home.join(filename).exists());
+
+        let own = r#"{"local-projects":{"mine":{"name":"Work"}},"project-order":["mine"]}"#;
+        fs::write(target.codex_home.join(filename), own)?;
+        seed(&store, &target);
+        link_for(Tool::Codex, &source, &target)?;
+        link(&source, &target, true)?;
+        assert_eq!(fs::read_to_string(target.codex_home.join(filename))?, own);
+        Ok(())
+    }
 
     fn store(root: &Path) -> Store {
         Store::new(root.join("ditto"), root.join("home"))

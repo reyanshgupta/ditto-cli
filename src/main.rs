@@ -1,6 +1,5 @@
 mod cli;
 mod codex_plugins;
-mod desktop;
 mod herdr;
 mod history;
 mod indicator;
@@ -345,7 +344,7 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             created["settings_copied"] = json!(copied.copied);
             created["shared"] = json!(linked.linked);
             created["shared_copied"] = json!(linked.copied);
-            created["desktop_projects_copied"] = json!(linked.desktop_projects);
+            created["desktop_projects_copied"] = json!([]);
             created["shared_failed"] = json!(
                 linked
                     .failed
@@ -396,12 +395,6 @@ fn create_profile(store: &Store, name: &str, json: bool) -> Result<()> {
             }
             if !linked.linked.is_empty() {
                 println!("Reading yours for: {}.", linked.linked.join(", "));
-            }
-            if !linked.desktop_projects.is_empty() {
-                println!(
-                    "Copied desktop projects: {}.",
-                    linked.desktop_projects.join(", ")
-                );
             }
             for (path, reason) in &linked.failed {
                 println!("Could not share {path}: {reason}");
@@ -527,7 +520,7 @@ fn sync_payload(outcome: &SyncOutcome) -> Value {
         "kept": outcome.copied.kept,
         "shared": outcome.linked.linked,
         "shared_copied": outcome.linked.copied,
-        "desktop_projects_copied": outcome.linked.desktop_projects,
+        "desktop_projects_copied": [],
         "shared_kept": outcome.linked.kept,
         "shared_failed": outcome
             .linked
@@ -565,12 +558,6 @@ fn print_sync(outcome: &SyncOutcome) {
             "Copied local plugin code into '{}': {}.",
             outcome.profile,
             outcome.linked.copied.join(", ")
-        );
-    }
-    if !outcome.linked.desktop_projects.is_empty() {
-        println!(
-            "Copied desktop projects: {}. Open the desktop app to load them.",
-            outcome.linked.desktop_projects.join(", ")
         );
     }
     if outcome.copied.changed() {

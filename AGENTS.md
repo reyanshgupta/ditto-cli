@@ -65,7 +65,7 @@ The other thing a launch writes is a repair, and it is the one case where Ditto 
 
 Launch preparation also provisions missing tool roots and links newly available allowlisted paths for the selected tool, without adopting existing profile copies. `create --json` and `sync --json` expose link failures as `shared_failed`. Claude's native root follows `CLAUDE_CONFIG_DIR`, preserved as `DITTO_NATIVE_CLAUDE_CONFIG_DIR` inside launched tools. Nested launches restore the original home, XDG bases, session overrides, and credential-backend switches before applying the new selection.
 
-Codex/ChatGPT Desktop's `.codex-global-state.json` mixes local project definitions with private account and conversation state, so never link or copy the whole file. `desktop::copy` carries only local project IDs, names, folder paths, and timestamps from the default profile, preserving existing IDs and equivalent folder sets. Creation and Codex launch seed only absent state files; `sync` merges missing definitions into existing state. Quit the desktop app before syncing and reopen it afterwards: its in-memory state otherwise overwrites external edits. Account sidebar atoms, server project IDs, cloud projects, selected projects, and thread assignments stay private, including with `--overwrite` or `--adopt`. JSON reports imported names as `desktop_projects_copied`; failures use `shared_failed` with path `codex/desktop-projects`.
+Codex/ChatGPT Desktop projects are private to each Ditto profile. Never link, copy, seed, or merge `.codex-global-state.json` or project databases across profiles: project definitions, sidebar state, selected projects, and thread assignments must remain independent. This applies to creation, CLI/Desktop launch, and sync, including `--overwrite` and `--adopt`. Keep `desktop_projects_copied` as an empty JSON array for compatibility. Earlier versions copied project entries; remove unwanted entries through the affected desktop profile rather than guessing which existing projects to delete.
 
 Claude plugin installation writes absolute `installPath` values through the profile's shared plugins link. `shared::preserve_claude_plugins` changes only entries naming a Ditto profile and resolving to an existing location in that shared cache. It runs before rename and deletion, and during Claude launch and sync repairs, so those entries survive profile moves. Other plugin metadata stays intact. Claude settings sync merges `enabledPlugins` and `extraKnownMarketplaces` by entry, retaining existing per-entry choices unless `--overwrite` is set; other settings still merge by top-level key.
 
@@ -121,7 +121,7 @@ These strings are an interface. Changing one breaks callers, so treat it as a de
 | `indicator.outcome` | `installed`, `already_on`, `alongside`, `removed`, `restored`, `off`, `foreign`, `shadowed` |
 | `profiles[].managed` | `false` only for the reserved `default` profile |
 | `shared_failed` on `create` and `sync` | array of objects with `path` and `reason`; empty when every attempted link succeeded |
-| `desktop_projects_copied` on `create` and `sync` | array of local desktop project names imported from the default profile |
+| `desktop_projects_copied` on `create` and `sync` | always `[]`; retained for compatibility, projects remain isolated |
 
 They live in `Tool::key`, `AuthStatus::key`, and `Indicator::key`, each kept deliberately apart from the `label`/`describe` method beside it. Labels are written for a person and may be reworded freely; keys may not.
 
@@ -139,7 +139,6 @@ Everything is one binary crate under `src/`. There is no `tests/` directory: uni
 | `launch.rs` | `Tool`, running a tool with the profile's environment, launching isolated Codex Desktop windows on macOS, and reading each tool's sign-in state. Also when the pseudoterminal is skipped: `DITTO_NO_PROXY` and herdr (`HERDR_PANE_ID`). |
 | `indicator.rs` | Claude Code's `statusLine` in `settings.json`, the `statusline` subcommand that draws it, and terminal titles. |
 | `settings.rs` | Reading and writing Claude Code's `settings.json`, and copying the user's own settings into a profile at creation or on `sync`. |
-| `desktop.rs` | Copying allowlisted local desktop project definitions without copying account or task state. |
 | `shared.rs` | The allowlist of configuration and extension paths a profile links back to the user's own — skills, subagents, commands, hooks, plugins — the linking itself, and `repair`, which mends the links an installer wrote through one of Ditto's. |
 | `codex_plugins.rs` | Profile-local Codex plugin cache copies and migration of old shared plugin links, required by Codex's trusted executable loader. |
 | `history.rs` | One-time conversation backfills for every tool. File stores copy only missing files; opencode sessions cross through its export/import commands so credentials never do. |

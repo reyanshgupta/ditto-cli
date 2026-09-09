@@ -109,14 +109,13 @@ sys.exit(23 if '--fail' in sys.argv else 0)
         write(Path(native["codex"]) / "plugins/cache/fixture/1/service.mjs", "plugin code")
         created = run("create", "work", "--json")
         assert created["shared_failed"] == [], created["shared_failed"]
-        assert created["desktop_projects_copied"] == ["SharePi"]
+        assert created["desktop_projects_copied"] == []
         assert created["shared_copied"] == ["codex/plugins/cache"]
         code = Path(created["codex"]) / "plugins/cache/fixture/1/service.mjs"
         assert code.read_text() == "plugin code"
         assert code.resolve().is_relative_to(Path(created["codex"]).resolve())
         profile_desktop = Path(created["codex"]) / ".codex-global-state.json"
-        assert json.loads(profile_desktop.read_text()) == {
-            "local-projects": {"pi": desktop_project}, "project-order": ["pi"]}
+        assert not profile_desktop.exists()
         run("create", "other", "--json")
         expected_tools = {key.replace("_", "-") for key in created
                           if key in {tool.replace("-", "_") for tool in ROOTS}}
@@ -146,15 +145,17 @@ sys.exit(23 if '--fail' in sys.argv else 0)
         }))
         core_project = dict(desktop_project, id="core", name="ShareOS", rootPaths=[str(root / "core")])
         write(native_desktop, json.dumps({"local-projects": {"pi": desktop_project, "core": core_project}}))
-        # Launching a CLI beside a desktop app must not rewrite the state that
-        # the desktop process has already loaded into memory.
+        # A new profile stays empty even after launch; an existing project list
+        # belongs to its profile and must survive sync unchanged.
+        assert not profile_desktop.exists()
+        write(profile_desktop, json.dumps({"local-projects": {"own": {"name": "Private project"}}}))
         before = profile_desktop.read_bytes()
         run("codex", "work", "--", "probe")
         assert profile_desktop.read_bytes() == before
         synced = run("sync", "work", "--json")
         assert synced["shared_failed"] == [], synced["shared_failed"]
-        assert synced["desktop_projects_copied"] == ["ShareOS"]
-        assert json.loads(profile_desktop.read_text())["local-projects"]["core"] == core_project
+        assert synced["desktop_projects_copied"] == []
+        assert profile_desktop.read_bytes() == before
         settings = json.loads((Path(created["claude"]) / "settings.json").read_text())
         assert settings["enabledPlugins"]["later@local"] is True
         assert settings["model"] == "original"

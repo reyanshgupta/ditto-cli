@@ -636,10 +636,13 @@ fn codex_desktop_command(
     user_data: Option<&Path>,
 ) -> Command {
     let mut command = Command::new("open");
-    // The stock app may already be running. Opening it without overrides keeps
-    // its session intact instead of claiming to change an existing process.
+    // Without `-n`, Launch Services activates whichever ChatGPT process is
+    // already running, and with a managed profile window open that is the
+    // wrong account: the stock profile is focused into someone else's window
+    // and never starts. `-n` always asks for a new process; when the stock app
+    // is already running, its own single-instance lock hands off to it.
+    command.arg("-n");
     if let Some(user_data) = user_data {
-        command.arg("-n");
         let mut environment = base_command(Tool::Codex, profile);
         // Launch Services does not inherit the invoking shell's environment.
         // Carry Ditto's original roots so a CLI opened inside this window can
@@ -1073,6 +1076,27 @@ mod tests {
             0o755
         );
         assert!(state.is_symlink());
+    }
+
+    /// With a managed profile window open, `open -a` without `-n` only focuses
+    /// that window, so the stock profile could never be started beside it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stock_desktop_profile_always_requests_a_new_process() {
+        let stock = Profile {
+            managed: false,
+            ..profile()
+        };
+        let command =
+            codex_desktop_command(Path::new("/Applications/ChatGPT.app"), &stock, None, None);
+        let args = command.get_args().collect::<Vec<_>>();
+
+        assert_eq!(args[0], "-n");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.to_string_lossy().starts_with("--user-data-dir="))
+        );
     }
 
     #[test]
